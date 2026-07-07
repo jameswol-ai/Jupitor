@@ -5,6 +5,7 @@ import requests
 import sqlite3
 from datetime import datetime, timedelta
 import hashlib
+import json
 
 # ------------------------------------------------------------------
 # DATABASE SETUP
@@ -12,29 +13,39 @@ import hashlib
 def init_db():
     conn = sqlite3.connect("arc_os.db")
     c = conn.cursor()
+
+    # Users table (now with email)
     c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user')''')
-    # Seed admin user if not exists
+                 (username TEXT PRIMARY KEY, password_hash TEXT,
+                  email TEXT, role TEXT DEFAULT 'user')''')
+    # Seed admin if not exists
     c.execute("SELECT COUNT(*) FROM users WHERE username='admin'")
     if c.fetchone()[0] == 0:
         admin_hash = hashlib.sha256("arc2024".encode()).hexdigest()
-        c.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')",
-                  ("admin", admin_hash))
+        c.execute("INSERT INTO users (username, password_hash, email, role) VALUES (?, ?, ?, 'admin')",
+                  ("admin", admin_hash, "admin@arcos.pro"))
+
+    # Forex quotes
     c.execute('''CREATE TABLE IF NOT EXISTS forex_quotes
                  (timestamp TEXT, pair TEXT, rate REAL)''')
+
+    # Structural analyses (existing, keep)
     c.execute('''CREATE TABLE IF NOT EXISTS structural_analyses
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  timestamp TEXT,
-                  beam_length REAL,
-                  load_magnitude REAL,
-                  load_type TEXT,
-                  material TEXT,
-                  moment REAL,
-                  shear REAL,
-                  stress_bending REAL,
-                  stress_shear REAL,
-                  deflection REAL,
+                  timestamp TEXT, beam_length REAL, load_magnitude REAL,
+                  load_type TEXT, material TEXT, moment REAL, shear REAL,
+                  stress_bending REAL, stress_shear REAL, deflection REAL,
                   status TEXT)''')
+
+    # Building elements table (new)
+    c.execute('''CREATE TABLE IF NOT EXISTS building_elements
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  username TEXT,
+                  type TEXT,           -- column, beam, slab, wall, opening
+                  subtype TEXT,        -- e.g. door, window, rect_column, circ_column
+                  params TEXT,         -- JSON string of dimensions/position
+                  timestamp TEXT)''')
+
     conn.commit()
     return conn
 
@@ -42,15 +53,14 @@ def get_db_connection():
     return sqlite3.connect("arc_os.db")
 
 # ------------------------------------------------------------------
-# AUTHENTICATION & USER MANAGEMENT (DB + fallback)
+# AUTHENTICATION & USER MANAGEMENT
 # ------------------------------------------------------------------
-# Fallback hardcoded users for compatibility (will be checked after DB)
 FALLBACK_USERS = {
-    "demo": hashlib.sha256("demo".encode()).hexdigest()
+    "demo": (hashlib.sha256("demo".encode()).hexdigest(), "user")
 }
 
 def authenticate(username, password):
-    """Check user against DB first, then fallback dict."""
+    """Check user against DB, then fallback. Returns (success, role)."""
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT password_hash, role FROM users WHERE username=?", (username,))
@@ -59,24 +69,45 @@ def authenticate(username, password):
         db_hash, role = row
         if hashlib.sha256(password.encode()).hexdigest() == db_hash:
             return True, role
-    # Fallback to hardcoded
     if username in FALLBACK_USERS:
-        if hashlib.sha256(password.encode()).hexdigest() == FALLBACK_USERS[username]:
-            return True, "user"
+        h, r = FALLBACK_USERS[username]
+        if hashlib.sha256(password.encode()).hexdigest() == h:
+            return True, r
     return False, None
 
-def add_user(username, password, role="user"):
-    """Add a new user to the database. Returns success message or error."""
+def add_user(username, password, email, role="user"):
+    """Add a new user to DB. Returns (success, message)."""
     conn = get_db_connection()
     c = conn.cursor()
     try:
         pwd_hash = hashlib.sha256(password.encode()).hexdigest()
-        c.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-                  (username, pwd_hash, role))
+        c.execute("INSERT INTO users (username, password_hash, email, role) VALUES (?, ?, ?, ?)",
+                  (username, pwd_hash, email, role))
         conn.commit()
+        # Simulate email notification
+        st.toast(f"📧 Account created for {email} (email notification sent)")
         return True, f"User '{username}' added successfully."
     except sqlite3.IntegrityError:
         return False, "Username already exists."
+
+def register_user():
+    """Display a registration form."""
+    st.markdown("<h2 style='text-align:center;'>📝 Register New Account</h2>", unsafe_allow_html=True)
+    with st.form("register_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        email = st.text_input("Email")
+        role = "user"  # always user for self-registration
+        submitted = st.form_submit_button("Register")
+        if submitted:
+            if not username or not password or not email:
+                st.error("All fields are required.")
+            else:
+                success, msg = add_user(username, password, email, role)
+                if success:
+                    st.success(msg + " You can now login.")
+                else:
+                    st.error(msg)
 
 def login():
     st.markdown("<h1 style='text-align: center;'>🔐 Arc OS Pro Login</h1>", unsafe_allow_html=True)
@@ -95,21 +126,38 @@ def login():
                     st.rerun()
                 else:
                     st.error("Invalid username or password")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("<p style='text-align:center;'>Don't have an account? <a href='#register'>Register here</a></p>", unsafe_allow_html=True)
+        # Using a button to toggle registration
+        if st.button("Register a new account"):
+            st.session_state.show_registration = True
+            st.rerun()
 
+# Session state init
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
+if "show_registration" not in st.session_state:
+    st.session_state.show_registration = False
+
 if not st.session_state.authenticated:
-    login()
+    if st.session_state.show_registration:
+        register_user()
+        if st.button("Back to Login"):
+            st.session_state.show_registration = False
+            st.rerun()
+    else:
+        login()
     st.stop()
 
 def logout():
-    st.session_state.authenticated = False
-    st.session_state.pop("username", None)
-    st.session_state.pop("role", None)
+    for key in ["authenticated", "username", "role", "show_registration"]:
+        if key in st.session_state:
+            del st.session_state[key]
     st.rerun()
 
 # ------------------------------------------------------------------
-# FOREX ENGINE (Fixed for unsupported currencies)
+# FOREX ENGINE (same as before, with graceful handling)
 # ------------------------------------------------------------------
 class ForexEngine:
     PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "UGX/USD", "KES/USD", "SSP/USD"]
@@ -120,8 +168,6 @@ class ForexEngine:
 
     @staticmethod
     def fetch_latest_rates():
-        """Fetch rates from Frankfurter API. Returns dict of pair->rate, missing pairs set to None."""
-        # Collect all unique currencies needed
         currencies = set()
         for base, target in ForexEngine.BASE_CURRENCIES.values():
             currencies.update([base, target])
@@ -133,8 +179,6 @@ class ForexEngine:
             resp.raise_for_status()
             data = resp.json()
             eur_to = data["rates"]
-            # If a currency is missing from ECB rates, eur_to won't have it.
-            # We'll handle missing currencies gracefully.
             for pair, (base, target) in ForexEngine.BASE_CURRENCIES.items():
                 if base == target:
                     rate = 1.0
@@ -152,7 +196,7 @@ class ForexEngine:
                         rate = None
                 live_rates[pair] = round(rate, 4) if rate is not None else None
         except Exception as e:
-            st.warning(f"Live fetch failed: {e}. Using simulated data for all pairs.")
+            st.warning(f"Live fetch failed: {e}. Using simulated data.")
             return None
         return live_rates
 
@@ -165,24 +209,22 @@ class ForexEngine:
                 now = datetime.now()
                 times = [now - timedelta(minutes=i) for i in range(minutes)][::-1]
                 data = {"Time": times}
+                defaults = {"EUR/USD":1.08,"GBP/USD":1.26,"USD/JPY":144.5,
+                            "UGX/USD":3750,"KES/USD":145,"SSP/USD":1100}
                 for pair in ForexEngine.PAIRS:
                     if live[pair] is not None:
                         base = live[pair]
                         vol = base * 0.0002
                     else:
-                        # Fall back to a reasonable default for missing pairs
-                        defaults = {"EUR/USD":1.08,"GBP/USD":1.26,"USD/JPY":144.5,
-                                    "UGX/USD":3750,"KES/USD":145,"SSP/USD":1100}
                         base = defaults.get(pair, 1.0)
-                        vol = base * 0.001  # higher vol for simulated
-                        st.info(f"Using simulated data for {pair} (currency not available in live feed).")
+                        vol = base * 0.001
+                        st.info(f"Using simulated data for {pair} (currency unavailable in live feed).")
                     prices = base + np.cumsum(np.random.normal(0, vol, minutes))
                     data[pair] = np.round(np.maximum(prices, 0.0001), 4)
                 df = pd.DataFrame(data)
                 if store_db:
                     ForexEngine._store_quotes(live)
                 return df
-        # Fully simulated fallback
         return ForexEngine._simulated_data(minutes)
 
     @staticmethod
@@ -256,114 +298,189 @@ class ForexEngine:
         return pd.DataFrame({"Time": times, "Volume": volume})
 
 # ------------------------------------------------------------------
-# ARCHITECTURAL ENGINE
+# ADVANCED STRUCTURAL MODULE (Building Elements)
 # ------------------------------------------------------------------
-class SaiArchitect:
-    MATERIALS = {
-        "Steel S355": {"fy": 355e6, "E": 210e9, "gamma": 1.0, "I": 1e-4, "W": 2e-3, "def_lim": 1/250},
-        "Concrete C30": {"fy": 500e6, "E": 30e9, "gamma": 1.5, "I": 2e-4, "W": 1e-3, "def_lim": 1/300},
-        "Timber GL24h": {"fy": 24e6, "E": 12e9, "gamma": 1.3, "I": 5e-4, "W": 3e-3, "def_lim": 1/200},
-        "Composite": {"fy": 500e6, "E": 40e9, "gamma": 1.0, "I": 3e-4, "W": 4e-3, "def_lim": 1/400}
+class StructuralModel:
+    ELEMENT_TYPES = {
+        "column": ["rectangular", "circular"],
+        "beam": ["rectangular"],
+        "slab": ["rectangular"],
+        "wall": ["rectangular"],
+        "opening": ["door", "window"]
     }
 
     @staticmethod
-    def structural_analysis(beam_length, load_mag, load_type, material):
-        props = SaiArchitect.MATERIALS[material]
-        E, I, W, fy, gamma = props["E"], props["I"], props["W"], props["fy"], props["gamma"]
-        limit_def = props["def_lim"] * beam_length
-
-        if load_type == "Uniform (kN/m)":
-            w = load_mag * 1000
-            M = w * beam_length**2 / 8
-            V = w * beam_length / 2
-            delta = (5 * w * beam_length**4) / (384 * E * I)
-        else:
-            P = load_mag * 1000
-            M = P * beam_length / 4
-            V = P / 2
-            delta = (P * beam_length**3) / (48 * E * I)
-
-        sigma = M / W
-        tau = 1.5 * V / 0.01
-        sigma_rd = fy / gamma
-        tau_rd = fy / (np.sqrt(3) * gamma)
-        util_m = sigma / sigma_rd
-        util_v = tau / tau_rd
-        ok = util_m <= 1 and util_v <= 1 and delta <= limit_def
-        result = {
-            "Design Moment (kNm)": round(M/1000,2),
-            "Shear (kN)": round(V/1000,2),
-            "Bending Stress (MPa)": round(sigma/1e6,2),
-            "Shear Stress (MPa)": round(tau/1e6,2),
-            "Deflection (mm)": round(delta*1000,2),
-            "Allowable Deflection (mm)": round(limit_def*1000,2),
-            "Moment Util.": round(util_m,2),
-            "Shear Util.": round(util_v,2),
-            "Deflection OK": "✅" if delta <= limit_def else "❌",
-            "Status": "OK ✅" if ok else "FAIL ❌"
-        }
+    def add_element(username, elem_type, subtype, params):
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute('''INSERT INTO structural_analyses 
-                     (timestamp, beam_length, load_magnitude, load_type, material,
-                      moment, shear, stress_bending, stress_shear, deflection, status)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                  (datetime.now().isoformat(), beam_length, load_mag, load_type, material,
-                   M/1000, V/1000, sigma/1e6, tau/1e6, delta*1000, result["Status"]))
+        c.execute('''INSERT INTO building_elements (username, type, subtype, params, timestamp)
+                     VALUES (?, ?, ?, ?, ?)''',
+                  (username, elem_type, subtype, json.dumps(params), datetime.now().isoformat()))
         conn.commit()
-        return result
+        # Simulated email notification after adding element
+        user_email = StructuralModel.get_user_email(username)
+        if user_email:
+            st.toast(f"📧 Element added. Report sent to {user_email}")
 
     @staticmethod
-    def get_history(limit=5):
+    def get_user_email(username):
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT email FROM users WHERE username=?", (username,))
+        row = c.fetchone()
+        return row[0] if row else None
+
+    @staticmethod
+    def get_elements(username):
         conn = get_db_connection()
         df = pd.read_sql_query(
-            "SELECT * FROM structural_analyses ORDER BY timestamp DESC LIMIT ?",
-            conn, params=(limit,))
+            "SELECT * FROM building_elements WHERE username=? ORDER BY timestamp DESC",
+            conn, params=(username,))
+        if not df.empty:
+            df["params"] = df["params"].apply(json.loads)
         return df
 
-# ------------------------------------------------------------------
-# 3D VIEWER
-# ------------------------------------------------------------------
-def render_3d_viewer(beam_length, load_magnitude, load_type, material):
-    html_code = f"""
-    <!DOCTYPE html>
-    <html><head><style> body {{ margin:0; overflow:hidden; }} </style>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script></head>
-    <body><script>
-        const scene = new THREE.Scene(); scene.background = new THREE.Color(0x111122);
-        const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 1000);
-        camera.position.set(8,5,8); camera.lookAt(0,2,0);
-        const renderer = new THREE.WebGLRenderer({{ antialias: true }});
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        document.body.appendChild(renderer.domElement);
-        scene.add(new THREE.AmbientLight(0x404080));
-        const dirLight = new THREE.DirectionalLight(0xffffff,1); dirLight.position.set(1,2,1); scene.add(dirLight);
-        const beamGeo = new THREE.BoxGeometry({beam_length},0.2,0.3);
-        const beam = new THREE.Mesh(beamGeo, new THREE.MeshPhongMaterial({{ color:0x3a7bd5, emissive:0x001122 }}));
-        beam.position.y=2; scene.add(beam);
-        const supMat = new THREE.MeshPhongMaterial({{ color:0x00d2ff, emissive:0x002222 }});
-        const leftSup = new THREE.Mesh(new THREE.CylinderGeometry(0.3,0.3,1.5,8), supMat);
-        leftSup.position.set(-{beam_length/2+0.2},1.25,0); scene.add(leftSup);
-        const rightSup = leftSup.clone(); rightSup.position.x={beam_length/2+0.2}; scene.add(rightSup);
-        const arrow = new THREE.ArrowHelper(new THREE.Vector3(0,-1,0), new THREE.Vector3(0,2.2,0), 1.2, 0xff4b2b, 0.3,0.2); scene.add(arrow);
-        const canvas = document.createElement('canvas'); canvas.width=128; canvas.height=64;
-        const ctx = canvas.getContext('2d'); ctx.fillStyle='#ffffff'; ctx.font='bold 20px Arial'; ctx.textAlign='center';
-        ctx.fillText('{load_magnitude} kN',64,35);
-        const texture = new THREE.CanvasTexture(canvas);
-        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({{ map:texture }}));
-        sprite.position.set(0.8,2.6,0); sprite.scale.set(1.5,0.75,1); scene.add(sprite);
-        scene.add(new THREE.GridHelper(10,20,0x336699,0x224466));
-        let isDragging=false, prev={{x:0,y:0}};
-        renderer.domElement.addEventListener('mousedown',e=>{{ isDragging=true; prev.x=e.clientX; prev.y=e.clientY; }});
-        renderer.domElement.addEventListener('mouseup',()=>isDragging=false);
-        renderer.domElement.addEventListener('mousemove',e=>{{ if(isDragging){{ camera.position.x+=(e.clientX-prev.x)*0.01; camera.position.y-=(e.clientY-prev.y)*0.01; camera.lookAt(0,2,0); prev.x=e.clientX; prev.y=e.clientY; }} }});
-        renderer.domElement.addEventListener('wheel',e=>{{ camera.position.z+=e.deltaY*0.01; camera.lookAt(0,2,0); e.preventDefault(); }});
-        function animate(){{ requestAnimationFrame(animate); renderer.render(scene,camera); }} animate();
-    </script></body></html>"""
-    st.components.v1.html(html_code, height=350)
+    @staticmethod
+    def delete_element(element_id):
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("DELETE FROM building_elements WHERE id=?", (element_id,))
+        conn.commit()
+
+    @staticmethod
+    def clear_all(username):
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("DELETE FROM building_elements WHERE username=?", (username,))
+        conn.commit()
+
+    @staticmethod
+    def generate_3d_scene(elements_df):
+        """Returns HTML/JS code for a Three.js scene representing the building."""
+        # Build JS objects array from elements
+        objects_js = []
+        for _, row in elements_df.iterrows():
+            p = row["params"]
+            t = row["type"]
+            stype = row["subtype"]
+            # Define position, size, color based on type
+            if t == "column":
+                x = p.get("x", 0)
+                z = p.get("z", 0)
+                height = p.get("height", 3)
+                if stype == "circular":
+                    radius = p.get("radius", 0.15)
+                    obj = f"{{type:'cylinder', pos:[{x}, {height/2}, {z}], size:[{radius}, {height}, {radius}], color:0x00aaff}}"
+                else:
+                    w = p.get("width", 0.3)
+                    d = p.get("depth", 0.3)
+                    obj = f"{{type:'box', pos:[{x}, {height/2}, {z}], size:[{w}, {height}, {d}], color:0x00aaff}}"
+            elif t == "beam":
+                x1, z1 = p.get("x1", 0), p.get("z1", 0)
+                x2, z2 = p.get("x2", 4), p.get("z2", 0)
+                length = np.sqrt((x2-x1)**2 + (z2-z1)**2)
+                mid_x = (x1+x2)/2
+                mid_z = (z1+z2)/2
+                y = p.get("y", 3)
+                w = p.get("width", 0.2)
+                d = p.get("depth", 0.3)
+                angle = np.arctan2(z2-z1, x2-x1)
+                obj = f"{{type:'box', pos:[{mid_x}, {y}, {mid_z}], size:[{length}, {d}, {w}], color:0xffaa00, rotY:{angle}}}"
+            elif t == "slab":
+                x = p.get("x", 0)
+                z = p.get("z", 0)
+                w = p.get("width", 4)
+                d = p.get("depth", 4)
+                thickness = p.get("thickness", 0.15)
+                y = p.get("y", 3)
+                obj = f"{{type:'box', pos:[{x}, {y}, {z}], size:[{w}, {thickness}, {d}], color:0x888888}}"
+            elif t == "wall":
+                x1, z1 = p.get("x1", 0), p.get("z1", 0)
+                x2, z2 = p.get("x2", 4), p.get("z2", 0)
+                length = np.sqrt((x2-x1)**2 + (z2-z1)**2)
+                mid_x = (x1+x2)/2
+                mid_z = (z1+z2)/2
+                height = p.get("height", 3)
+                thickness = p.get("thickness", 0.15)
+                y = height/2
+                angle = np.arctan2(z2-z1, x2-x1)
+                obj = f"{{type:'box', pos:[{mid_x}, {y}, {mid_z}], size:[{length}, {height}, {thickness}], color:0xcccccc, rotY:{angle}}}"
+            elif t == "opening":
+                # Opening modifies a wall; for simplicity we'll place a frame placeholder
+                wall_x = p.get("wall_x", 0)
+                wall_z = p.get("wall_z", 0)
+                pos_x = p.get("pos_x", 0)
+                pos_z = p.get("pos_z", 0)
+                width = p.get("width", 1)
+                height = p.get("height", 2.1)
+                if stype == "door":
+                    color = 0x8B4513
+                else:
+                    color = 0xADD8E6
+                obj = f"{{type:'box', pos:[{pos_x}, {height/2}, {pos_z}], size:[{width}, {height}, 0.1], color:{color}}}"
+            objects_js.append(obj)
+        objects_str = ",\n".join(objects_js)
+
+        html = f"""
+        <!DOCTYPE html>
+        <html><head><style>body{{margin:0;overflow:hidden;}}</style>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script></head>
+        <body><script>
+            const scene = new THREE.Scene(); scene.background = new THREE.Color(0x1a1a2e);
+            const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 1000);
+            camera.position.set(8, 5, 8); camera.lookAt(2, 1.5, 2);
+            const renderer = new THREE.WebGLRenderer({{antialias: true}});
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+            scene.add(new THREE.AmbientLight(0x404066));
+            const dirLight = new THREE.DirectionalLight(0xffffff,1); dirLight.position.set(5,10,7); scene.add(dirLight);
+            scene.add(new THREE.GridHelper(10,20,0x336699,0x224466));
+
+            // Add elements
+            const objects = [{objects_str}];
+            objects.forEach(obj => {{
+                let mesh;
+                if (obj.type === 'box') {{
+                    mesh = new THREE.Mesh(
+                        new THREE.BoxGeometry(obj.size[0], obj.size[1], obj.size[2]),
+                        new THREE.MeshPhongMaterial({{color: obj.color, transparent: true, opacity: 0.9}})
+                    );
+                }} else if (obj.type === 'cylinder') {{
+                    mesh = new THREE.Mesh(
+                        new THREE.CylinderGeometry(obj.size[0], obj.size[0], obj.size[1], 32),
+                        new THREE.MeshPhongMaterial({{color: obj.color, transparent: true, opacity: 0.9}})
+                    );
+                }}
+                mesh.position.set(obj.pos[0], obj.pos[1], obj.pos[2]);
+                if (obj.rotY) mesh.rotation.y = obj.rotY;
+                scene.add(mesh);
+            }});
+
+            // Controls
+            let isDragging = false, prev = {{x:0,y:0}};
+            renderer.domElement.addEventListener('mousedown', e=>{{ isDragging=true; prev.x=e.clientX; prev.y=e.clientY; }});
+            renderer.domElement.addEventListener('mouseup', ()=>isDragging=false);
+            renderer.domElement.addEventListener('mousemove', e=>{{
+                if(isDragging) {{
+                    camera.position.x += (e.clientX - prev.x)*0.01;
+                    camera.position.y -= (e.clientY - prev.y)*0.01;
+                    camera.lookAt(2,1.5,2);
+                    prev.x=e.clientX; prev.y=e.clientY;
+                }}
+            }});
+            renderer.domElement.addEventListener('wheel', e=>{{
+                camera.position.z += e.deltaY*0.01;
+                camera.lookAt(2,1.5,2);
+                e.preventDefault();
+            }});
+            function animate() {{ requestAnimationFrame(animate); renderer.render(scene,camera); }}
+            animate();
+        </script></body></html>
+        """
+        return html
 
 # ------------------------------------------------------------------
-# MAIN APP
+# STREAMLIT APP
 # ------------------------------------------------------------------
 st.set_page_config(page_title="Arc OS Pro", layout="wide")
 
@@ -377,14 +494,25 @@ def load_css():
         .metric-box { background: rgba(255,255,255,0.08); border-radius:12px; padding:15px; margin:5px 0; text-align:center; font-weight:bold; border:1px solid rgba(255,255,255,0.15); }
         div.stButton > button { background: linear-gradient(45deg, #ff416c, #ff4b2b); border:none; color:white; padding:12px 28px; font-size:16px; font-weight:bold; border-radius:50px; box-shadow:0 0 20px rgba(255,75,43,0.5); transition:all 0.3s ease; cursor:pointer; letter-spacing:0.5px; text-transform:uppercase; width:100%; border:1px solid rgba(255,255,255,0.2); }
         div.stButton > button:hover { transform:translateY(-2px); box-shadow:0 0 30px rgba(255,75,43,0.8); background:linear-gradient(45deg, #ff4b2b, #ff416c); color:white; }
-        div.stButton > button.arch { background: linear-gradient(45deg, #00b4db, #0083b0); box-shadow:0 0 20px rgba(0,180,219,0.5); }
-        div.stButton > button.arch:hover { box-shadow:0 0 30px rgba(0,180,219,0.8); background:linear-gradient(45deg, #0083b0, #00b4db); }
+        .stForm button { background: linear-gradient(45deg, #00b4db, #0083b0) !important; }
     </style>""", unsafe_allow_html=True)
 
 load_css()
 init_db()
 
-# Session state
+# Ensure role exists in session state
+if 'role' not in st.session_state:
+    # retrieve from DB for current user
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT role FROM users WHERE username=?", (st.session_state.username,))
+    row = c.fetchone()
+    if row:
+        st.session_state.role = row[0]
+    else:
+        st.session_state.role = "user"
+
+# Session state defaults
 if 'forex_data' not in st.session_state:
     st.session_state.forex_data = ForexEngine.get_live_data(use_real=True)
 if 'forex_volume' not in st.session_state:
@@ -398,33 +526,49 @@ if 'use_real_forex' not in st.session_state:
 with st.sidebar:
     st.markdown("## ⚙️ Arc OS Pro")
     st.write(f"👤 {st.session_state.username} ({st.session_state.role})")
-    mode = st.radio("🧠 Engine", ["💱 Forex Pro", "🏗️ Arch Pro"])
-    st.checkbox("Real‑time forex", value=st.session_state.use_real_forex, key="use_real_forex")
+    mode = st.radio("🧠 Engine", ["💱 Forex Pro", "🏗️ Structural Pro"])
+
     st.markdown("---")
+    if mode == "💱 Forex Pro":
+        st.checkbox("Real‑time forex", value=st.session_state.use_real_forex, key="use_real_forex")
+    else:
+        st.markdown("### 🧊 Building Designer")
+        st.info("Add columns, beams, slabs, walls, and openings. View in 3D.")
+
     # User management (admin only)
     if st.session_state.role == "admin":
         with st.expander("👥 User Management"):
-            st.markdown("### Add New User")
             with st.form("add_user_form"):
                 new_user = st.text_input("Username")
                 new_pass = st.text_input("Password", type="password")
+                new_email = st.text_input("Email")
                 new_role = st.selectbox("Role", ["user", "admin"])
                 if st.form_submit_button("Add User"):
-                    if new_user and new_pass:
-                        success, msg = add_user(new_user, new_pass, new_role)
+                    if new_user and new_pass and new_email:
+                        success, msg = add_user(new_user, new_pass, new_email, new_role)
                         if success:
                             st.success(msg)
                         else:
                             st.error(msg)
                     else:
-                        st.error("Username and password required.")
+                        st.error("All fields required.")
+
+    # Deployment help
+    with st.expander("🚀 Deploy to Streamlit Cloud"):
+        st.markdown("""
+        1. Push this `streamlit_app.py` + `requirements.txt` to GitHub.
+        2. Go to [share.streamlit.io](https://share.streamlit.io) and connect your repo.
+        3. Set branch `main`, file path `streamlit_app.py`.
+        4. Click **Deploy**. Done!
+        """)
+
     if st.button("🚪 Logout"):
         logout()
-    st.caption("v5.0 · Live + DB Users")
+    st.caption("v6.0 · Full Structural + Registration")
 
 st.markdown("<h1 style='text-align: center;'>🌌 Arc | AI Operating System Pro</h1>", unsafe_allow_html=True)
 
-# ------------------- FOREX MODULE -------------------
+# ====================== FOREX MODULE ======================
 if "Forex" in mode:
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.subheader("💹 Forex Pro: Live & Historical")
@@ -450,7 +594,7 @@ if "Forex" in mode:
     if not hist_df.empty:
         st.line_chart(hist_df.set_index("timestamp"))
     else:
-        st.info("No history yet. Data is stored after each refresh.")
+        st.info("No history yet.")
 
     st.subheader("📊 Volume")
     st.bar_chart(st.session_state.forex_volume.set_index("Time"))
@@ -465,45 +609,137 @@ if "Forex" in mode:
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ------------------- ARCH MODULE -------------------
+# ====================== STRUCTURAL PRO ======================
 else:
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.subheader("🏛️ Arch Pro: 3D Interactive Analysis")
-    col_input, col_viz = st.columns([1, 2])
-    with col_input:
-        st.markdown("### 📐 Design Parameters")
-        beam_length = st.slider("Beam Length (m)", 2.0, 15.0, 5.0, 0.5)
-        load_type = st.selectbox("Load Type", ["Uniform (kN/m)", "Point Load (kN)"])
-        if "Uniform" in load_type:
-            load_label = "Uniform Load (kN/m)"
-            load_min, load_max, load_def = 0.5, 200.0, 25.0
-        else:
-            load_label = "Point Load at Midspan (kN)"
-            load_min, load_max, load_def = 1.0, 500.0, 100.0
-        load_magnitude = st.slider(load_label, load_min, load_max, load_def, 1.0)
-        material = st.selectbox("Material", list(SaiArchitect.MATERIALS.keys()))
-        if st.button("⚡ Run Eurocode Check", key="run_analysis"):
-            st.session_state.arch_result = SaiArchitect.structural_analysis(
-                beam_length, load_magnitude, load_type, material
-            )
-        if st.session_state.arch_result:
-            res = st.session_state.arch_result
-            st.metric("Status", res["Status"])
-            tab1, tab2 = st.tabs(["Forces", "Stress/Deflection"])
-            with tab1:
-                st.metric("Moment", f"{res['Design Moment (kNm)']} kNm")
-                st.metric("Shear", f"{res['Shear (kN)']} kN")
-            with tab2:
-                st.metric("Bending Stress", f"{res['Bending Stress (MPa)']} MPa")
-                st.metric("Shear Stress", f"{res['Shear Stress (MPa)']} MPa")
-                st.metric("Deflection", f"{res['Deflection (mm)']} mm", delta=f"Limit {res['Allowable Deflection (mm)']} mm")
-                st.metric("Moment Util.", f"{res['Moment Util.']}", delta="OK" if res['Moment Util.']<=1 else "FAIL")
-            st.markdown("### 📋 Recent Analyses (from DB)")
-            hist = SaiArchitect.get_history(5)
-            st.dataframe(hist[["timestamp","beam_length","load_magnitude","material","status"]], use_container_width=True)
-    with col_viz:
-        st.markdown("### 🧊 Interactive 3D Model")
-        render_3d_viewer(beam_length, load_magnitude, load_type, material)
+    st.subheader("🏗️ Structural Pro: Building Designer")
+
+    # Add element form
+    with st.expander("➕ Add New Element", expanded=True):
+        elem_type = st.selectbox("Element Type", list(StructuralModel.ELEMENT_TYPES.keys()))
+        subtypes = StructuralModel.ELEMENT_TYPES[elem_type]
+        subtype = st.selectbox("Subtype", subtypes)
+
+        params = {}
+        col1, col2, col3 = st.columns(3)
+
+        if elem_type == "column":
+            with col1:
+                params["x"] = st.number_input("X position (m)", value=0.0)
+            with col2:
+                params["z"] = st.number_input("Z position (m)", value=0.0)
+            with col3:
+                params["height"] = st.number_input("Height (m)", value=3.0, min_value=0.1)
+            if subtype == "circular":
+                params["radius"] = st.number_input("Radius (m)", value=0.15, min_value=0.01)
+            else:
+                params["width"] = st.number_input("Width (m)", value=0.3, min_value=0.01)
+                params["depth"] = st.number_input("Depth (m)", value=0.3, min_value=0.01)
+
+        elif elem_type == "beam":
+            with col1:
+                params["x1"] = st.number_input("Start X (m)", value=0.0)
+                params["z1"] = st.number_input("Start Z (m)", value=0.0)
+            with col2:
+                params["x2"] = st.number_input("End X (m)", value=4.0)
+                params["z2"] = st.number_input("End Z (m)", value=0.0)
+            with col3:
+                params["y"] = st.number_input("Elevation Y (m)", value=3.0)
+            params["width"] = st.number_input("Width (m)", value=0.2, min_value=0.01)
+            params["depth"] = st.number_input("Depth (m)", value=0.3, min_value=0.01)
+
+        elif elem_type == "slab":
+            with col1:
+                params["x"] = st.number_input("Center X (m)", value=2.0)
+            with col2:
+                params["z"] = st.number_input("Center Z (m)", value=2.0)
+            with col3:
+                params["y"] = st.number_input("Level Y (m)", value=3.0)
+            params["width"] = st.number_input("Width (m)", value=4.0, min_value=0.1)
+            params["depth"] = st.number_input("Depth (m)", value=4.0, min_value=0.1)
+            params["thickness"] = st.number_input("Thickness (m)", value=0.15, min_value=0.01)
+
+        elif elem_type == "wall":
+            with col1:
+                params["x1"] = st.number_input("Start X (m)", value=0.0)
+                params["z1"] = st.number_input("Start Z (m)", value=0.0)
+            with col2:
+                params["x2"] = st.number_input("End X (m)", value=4.0)
+                params["z2"] = st.number_input("End Z (m)", value=0.0)
+            with col3:
+                params["height"] = st.number_input("Height (m)", value=3.0)
+            params["thickness"] = st.number_input("Thickness (m)", value=0.15, min_value=0.01)
+
+        elif elem_type == "opening":
+            with col1:
+                params["wall_x"] = st.number_input("Wall center X (m)", value=2.0)
+                params["wall_z"] = st.number_input("Wall center Z (m)", value=0.0)
+            with col2:
+                params["pos_x"] = st.number_input("Opening center X (m)", value=2.0)
+                params["pos_z"] = st.number_input("Opening center Z (m)", value=0.0)
+            with col3:
+                params["width"] = st.number_input("Width (m)", value=1.0, min_value=0.1)
+                params["height"] = st.number_input("Height (m)", value=2.1, min_value=0.1)
+
+        if st.button("Add Element"):
+            StructuralModel.add_element(st.session_state.username, elem_type, subtype, params)
+            st.rerun()
+
+    # Display elements & 3D view
+    elements = StructuralModel.get_elements(st.session_state.username)
+    if not elements.empty:
+        st.markdown("### 🧊 3D Building View")
+        # Render Three.js scene
+        html = StructuralModel.generate_3d_scene(elements)
+        st.components.v1.html(html, height=450)
+
+        st.markdown("### 📋 Elements List")
+        for idx, row in elements.iterrows():
+            p = row["params"]
+            col1, col2, col3 = st.columns([3,1,1])
+            with col1:
+                if row["type"] == "opening":
+                    desc = f"{row['subtype']} at ({p['pos_x']:.2f}, {p['pos_z']:.2f}) {p['width']}x{p['height']}m"
+                else:
+                    desc = f"{row['type']} {row['subtype']}"
+                    if row["type"] in ["column","slab"]:
+                        desc += f" @ ({p.get('x',p.get('x1','?'))}, {p.get('z',p.get('z1','?'))})"
+                    else:
+                        desc += f" from ({p.get('x1',0):.2f},{p.get('z1',0):.2f}) to ({p.get('x2',0):.2f},{p.get('z2',0):.2f})"
+                st.write(desc)
+            with col2:
+                st.write(f"ID: {row['id']}")
+            with col3:
+                if st.button("🗑️ Delete", key=f"del_{row['id']}"):
+                    StructuralModel.delete_element(row['id'])
+                    st.rerun()
+    else:
+        st.info("No building elements yet. Add columns, beams, slabs, walls, or openings.")
+
+    # Quick analysis summary
+    if not elements.empty:
+        with st.expander("📊 Structural Analysis Summary"):
+            cols = elements[elements["type"]=="column"]
+            beams = elements[elements["type"]=="beam"]
+            slabs = elements[elements["type"]=="slab"]
+            walls = elements[elements["type"]=="wall"]
+            openings = elements[elements["type"]=="opening"]
+            st.write(f"**Columns:** {len(cols)} | **Beams:** {len(beams)} | **Slabs:** {len(slabs)} | **Walls:** {len(walls)} | **Openings:** {len(openings)}")
+            if len(slabs) > 0:
+                total_area = sum([p.get("width",0)*p.get("depth",0) for p in slabs["params"]])
+                st.write(f"Total slab area: {total_area:.2f} m²")
+            if len(beams) > 0:
+                lengths = [np.sqrt((p["x2"]-p["x1"])**2 + (p["z2"]-p["z1"])**2) for p in beams["params"]]
+                st.write(f"Total beam length: {sum(lengths):.2f} m")
+
+        # Fake email report button
+        if st.button("📧 Email Structural Report"):
+            email = StructuralModel.get_user_email(st.session_state.username)
+            if email:
+                st.toast(f"📧 Structural report sent to {email}")
+            else:
+                st.warning("No email on file. Add email in user profile (admin only).")
+
     st.markdown('</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
