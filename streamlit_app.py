@@ -298,6 +298,82 @@ class ForexEngine:
         return pd.DataFrame({"Time": times, "Volume": volume})
 
 # ------------------------------------------------------------------
+# FOREX & CRYPTO FORECAST ENGINE (Daily, Weekly, Monthly)
+# ------------------------------------------------------------------
+class ForexForecast:
+    BASE_PRICES = {
+        "EUR/USD": 1.08, "GBP/USD": 1.26, "USD/JPY": 144.5,
+        "UGX/USD": 3750, "KES/USD": 145, "SSP/USD": 1100
+    }
+    DAILY_VOL = {
+        "EUR/USD": 0.005, "GBP/USD": 0.006, "USD/JPY": 0.25,
+        "UGX/USD": 15, "KES/USD": 0.8, "SSP/USD": 12
+    }
+
+    @staticmethod
+    def generate_daily_history(days=90):
+        """Generate synthetic daily closing prices for all pairs."""
+        np.random.seed(123)
+        dates = pd.date_range(end=datetime.now(), periods=days, freq='D')
+        df = pd.DataFrame(index=dates)
+        for pair in ForexEngine.PAIRS:
+            start = ForexForecast.BASE_PRICES[pair]
+            vol = ForexForecast.DAILY_VOL[pair] * start
+            # random walk with slight drift
+            drift = 0.0001 * start if pair in ["EUR/USD","GBP/USD"] else 0.01
+            rets = np.random.normal(drift, vol, days)
+            prices = start * np.exp(np.cumsum(rets / start))
+            df[pair] = np.round(prices, 4)
+        return df
+
+    @staticmethod
+    def forecast(df, horizon_days, pair):
+        """Linear extrapolation of last 30 days."""
+        series = df[pair].tail(30)
+        x = np.arange(len(series))
+        y = series.values
+        coeffs = np.polyfit(x, y, 1)   # linear trend
+        last_idx = len(series) - 1
+        future_x = np.array([last_idx + d for d in range(1, horizon_days+1)])
+        forecast_y = np.polyval(coeffs, future_x)
+        return np.round(forecast_y, 4)
+
+class CryptoForecast:
+    COINS = CryptoEngine.COINS if 'CryptoEngine' in dir() else ["bitcoin","ethereum","ripple","cardano","solana"]
+    NAMES = {"bitcoin":"BTC","ethereum":"ETH","ripple":"XRP","cardano":"ADA","solana":"SOL"}
+    BASE_PRICES = {"bitcoin": 67000, "ethereum": 3400, "ripple": 0.6, "cardano": 0.45, "solana": 170}
+    DAILY_VOL = {"bitcoin": 1500, "ethereum": 120, "ripple": 0.03, "cardano": 0.02, "solana": 8}
+
+    @staticmethod
+    def generate_daily_history(days=90, live_prices=None):
+        """Synthetic daily history, optionally updated with live price as last point."""
+        np.random.seed(456)
+        dates = pd.date_range(end=datetime.now(), periods=days, freq='D')
+        df = pd.DataFrame(index=dates)
+        for coin in CryptoForecast.COINS:
+            start = CryptoForecast.BASE_PRICES[coin]
+            vol = CryptoForecast.DAILY_VOL[coin]
+            drift = 0.0005 * start  # small upward bias
+            rets = np.random.normal(drift, vol, days)
+            prices = start + np.cumsum(rets)
+            prices = np.maximum(prices, 0.01)
+            if live_prices and coin in live_prices and live_prices[coin] is not None:
+                prices[-1] = live_prices[coin]   # anchor last point to live
+            df[coin] = np.round(prices, 2)
+        return df
+
+    @staticmethod
+    def forecast(df, horizon_days, coin):
+        series = df[coin].tail(30)
+        x = np.arange(len(series))
+        y = series.values
+        coeffs = np.polyfit(x, y, 1)
+        last_idx = len(series) - 1
+        future_x = np.array([last_idx + d for d in range(1, horizon_days+1)])
+        forecast_y = np.polyval(coeffs, future_x)
+        return np.round(forecast_y, 2)
+
+# ------------------------------------------------------------------
 # CRYPTO ENGINE (Live via CoinGecko)
 # ------------------------------------------------------------------
 class CryptoEngine:
@@ -344,18 +420,9 @@ class CryptoEngine:
 class StructuralAnalysis:
     @staticmethod
     def truss_fem(nodes, elements, forces, constraints):
-        """
-        Simple 2D truss FEM.
-        nodes: list of (x, y)
-        elements: list of (node_i, node_j, E, A)
-        forces: dict node_idx -> (Fx, Fy)
-        constraints: dict node_idx -> (fixed_dx, fixed_dy) e.g. (True, True)
-        Returns displacements dict.
-        """
         n_nodes = len(nodes)
         ndof = 2 * n_nodes
         K = np.zeros((ndof, ndof))
-        # Assemble global stiffness
         for (i, j, E, A) in elements:
             xi, yi = nodes[i]
             xj, yj = nodes[j]
@@ -372,7 +439,6 @@ class StructuralAnalysis:
             for a in range(4):
                 for b in range(4):
                     K[dof_map[a], dof_map[b]] += k_local[a, b]
-        # Apply constraints and forces
         free_dofs = []
         for node in range(n_nodes):
             if not constraints.get(node, (False,False))[0]:
@@ -388,7 +454,6 @@ class StructuralAnalysis:
             if 2*node+1 in free_dofs:
                 idx = free_dofs.index(2*node+1)
                 F_free[idx] = fy
-        # Solve
         try:
             u_free = np.linalg.solve(K_free, F_free)
         except np.linalg.LinAlgError:
@@ -396,28 +461,22 @@ class StructuralAnalysis:
         u = np.zeros(ndof)
         for i, dof in enumerate(free_dofs):
             u[dof] = u_free[i]
-        # Format as dict
         disp = {i: (u[2*i], u[2*i+1]) for i in range(n_nodes)}
         return disp
 
     @staticmethod
     def beam_load_distribution(beam_length, load_type, load_mag, supports):
-        """
-        Compute reactions for a simply supported or cantilever beam.
-        supports: "simple" or "cantilever"
-        Returns dict with reaction forces.
-        """
         if load_type == "Uniform (kN/m)":
             w = load_mag
             if supports == "simple":
                 Ra = w * beam_length / 2
                 Rb = w * beam_length / 2
                 return {"Ra": Ra, "Rb": Rb}
-            else:  # cantilever
+            else:
                 M_fixed = w * beam_length**2 / 2
                 R_fixed = w * beam_length
                 return {"R_fixed": R_fixed, "M_fixed": M_fixed}
-        else:  # Point load at midspan
+        else:
             P = load_mag
             if supports == "simple":
                 Ra = P / 2
@@ -613,6 +672,22 @@ if 'forex_volume' not in st.session_state:
 if 'use_real_forex' not in st.session_state:
     st.session_state.use_real_forex = True
 
+# ---------- Forecast data in session state ----------
+if 'forex_daily_hist' not in st.session_state:
+    st.session_state.forex_daily_hist = ForexForecast.generate_daily_history(90)
+if 'crypto_live_prices' not in st.session_state:
+    st.session_state.crypto_live_prices = CryptoEngine.fetch_prices()
+if 'crypto_daily_hist' not in st.session_state:
+    # Build lookup of live prices for anchoring
+    live_dict = {}
+    if st.session_state.crypto_live_prices is not None:
+        for _, row in st.session_state.crypto_live_prices.iterrows():
+            # map name back to coin id
+            for cid, name in CryptoEngine.NAMES.items():
+                if name == row["Coin"]:
+                    live_dict[cid] = row["Price (USD)"]
+    st.session_state.crypto_daily_hist = CryptoForecast.generate_daily_history(90, live_dict)
+
 with st.sidebar:
     st.markdown("## ⚙️ Arc OS Pro")
     st.write(f"👤 {st.session_state.username} ({st.session_state.role})")
@@ -651,7 +726,7 @@ with st.sidebar:
 
     if st.button("🚪 Logout"):
         logout()
-    st.caption("v8.0 · FEM + Email + Crypto")
+    st.caption("v8.1 · Forecasts + Email + Crypto")
 
 st.markdown("<h1 style='text-align: center;'>🌌 Arc | AI Operating System Pro</h1>", unsafe_allow_html=True)
 
@@ -687,9 +762,42 @@ if mode == "💱 Forex Pro":
     st.table(ForexEngine.get_correlation_matrix(forex_df))
     st.subheader("📅 Economic Calendar")
     st.table(ForexEngine.generate_economic_calendar())
+
+    # ---------- FOREX FORECAST SECTION ----------
+    st.subheader("🔮 Forex Forecasts (Daily, Weekly, Monthly)")
+    forecast_horizon = st.radio("Forecast period", ["1 Day", "7 Days (Week)", "30 Days (Month)"], horizontal=True)
+    horizon_map = {"1 Day": 1, "7 Days (Week)": 7, "30 Days (Month)": 30}
+    days = horizon_map[forecast_horizon]
+    daily_hist = st.session_state.forex_daily_hist
+
+    forecast_table = []
+    chart_data = {}
+    for pair in ForexEngine.PAIRS:
+        fcast = ForexForecast.forecast(daily_hist, days, pair)
+        forecast_table.append({"Pair": pair, "Latest": daily_hist[pair].iloc[-1],
+                               "Forecast": fcast[-1], "Change": round(fcast[-1] - daily_hist[pair].iloc[-1], 4)})
+        # Prepare chart data: historical last 30 days + forecast
+        hist_part = daily_hist[pair].tail(30)
+        idx_hist = list(hist_part.index)
+        idx_fut = pd.date_range(idx_hist[-1] + pd.Timedelta(days=1), periods=days, freq='D')
+        combined = np.concatenate([hist_part.values, fcast])
+        chart_data[pair] = pd.Series(combined, index=list(idx_hist)+list(idx_fut))
+
+    # Show forecast table
+    fdf = pd.DataFrame(forecast_table)
+    st.dataframe(fdf.style.applymap(lambda x: 'color: #00ff88' if isinstance(x, (int,float)) and x>0 else 'color: #ff4b4b',
+                                    subset=['Change']), use_container_width=True)
+
+    # Plot combined historical + forecast
+    pair_for_chart = st.selectbox("Select pair for forecast chart", ForexEngine.PAIRS, key="forex_fcast_chart")
+    if pair_for_chart in chart_data:
+        st.line_chart(chart_data[pair_for_chart])
+
     if st.button("🔄 Refresh Live Data", key="forex_refresh"):
         st.session_state.forex_data = ForexEngine.get_live_data(use_real=st.session_state.use_real_forex)
         st.session_state.forex_volume = ForexEngine.get_volume()
+        # regenerate historical daily with new last price anchor?
+        # For simplicity, keep same synthetic history.
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -697,7 +805,7 @@ if mode == "💱 Forex Pro":
 elif mode == "₿ Crypto Tracker":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.subheader("₿ Live Crypto Prices")
-    prices_df = CryptoEngine.fetch_prices()
+    prices_df = st.session_state.crypto_live_prices
     if prices_df is not None:
         cols = st.columns(len(prices_df))
         for i, row in prices_df.iterrows():
@@ -710,10 +818,39 @@ elif mode == "₿ Crypto Tracker":
                     <span style="font-size:14px; color:{color};">24h: {change:.2f}%</span>
                 </div>""", unsafe_allow_html=True)
 
-        selected = st.selectbox("Select coin for chart", CryptoEngine.COINS)
+        selected = st.selectbox("Select coin for historical chart", CryptoEngine.COINS)
         hist = CryptoEngine.get_historical(selected, days=7)
         if hist is not None:
             st.line_chart(hist["price"])
+
+        # ---------- CRYPTO FORECAST SECTION ----------
+        st.subheader("🔮 Crypto Forecasts (Daily, Weekly, Monthly)")
+        crypto_horizon = st.radio("Forecast period", ["1 Day", "7 Days (Week)", "30 Days (Month)"], key="crypto_horizon", horizontal=True)
+        horizon_map_c = {"1 Day": 1, "7 Days (Week)": 7, "30 Days (Month)": 30}
+        c_days = horizon_map_c[crypto_horizon]
+        crypto_hist = st.session_state.crypto_daily_hist
+        c_forecast_table = []
+        c_chart_data = {}
+        for coin in CryptoForecast.COINS:
+            fcast = CryptoForecast.forecast(crypto_hist, c_days, coin)
+            c_forecast_table.append({"Coin": CryptoForecast.NAMES[coin],
+                                     "Latest": crypto_hist[coin].iloc[-1],
+                                     "Forecast": fcast[-1],
+                                     "Change": round(fcast[-1] - crypto_hist[coin].iloc[-1], 2)})
+            hist_part = crypto_hist[coin].tail(30)
+            idx_hist = list(hist_part.index)
+            idx_fut = pd.date_range(idx_hist[-1] + pd.Timedelta(days=1), periods=c_days, freq='D')
+            combined = np.concatenate([hist_part.values, fcast])
+            c_chart_data[coin] = pd.Series(combined, index=list(idx_hist)+list(idx_fut))
+
+        c_df = pd.DataFrame(c_forecast_table)
+        st.dataframe(c_df.style.applymap(lambda x: 'color: #00ff88' if isinstance(x, (int,float)) and x>0 else 'color: #ff4b4b',
+                                         subset=['Change']), use_container_width=True)
+
+        coin_for_chart = st.selectbox("Select coin for forecast chart", CryptoForecast.COINS, format_func=lambda x: CryptoForecast.NAMES[x], key="crypto_fcast_chart")
+        if coin_for_chart in c_chart_data:
+            st.line_chart(c_chart_data[coin_for_chart])
+
     else:
         st.error("Could not fetch crypto data.")
     st.markdown('</div>', unsafe_allow_html=True)
@@ -829,7 +966,6 @@ else:
             st.write("**Reactions:**")
             for k, v in reactions.items():
                 st.metric(k, f"{v:.2f} kN" if "M" not in k else f"{v:.2f} kN·m")
-            # Send email with results (if email configured)
             email = StructuralModel.get_user_email(st.session_state.username)
             if email:
                 send_email_notification(email, "Beam Analysis Results", str(reactions))
