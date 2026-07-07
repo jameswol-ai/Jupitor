@@ -7,11 +7,19 @@ from datetime import datetime, timedelta
 import hashlib
 
 # ------------------------------------------------------------------
-# DATABASE SETUP (SQLite)
+# DATABASE SETUP
 # ------------------------------------------------------------------
 def init_db():
     conn = sqlite3.connect("arc_os.db")
     c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                 (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user')''')
+    # Seed admin user if not exists
+    c.execute("SELECT COUNT(*) FROM users WHERE username='admin'")
+    if c.fetchone()[0] == 0:
+        admin_hash = hashlib.sha256("arc2024".encode()).hexdigest()
+        c.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')",
+                  ("admin", admin_hash))
     c.execute('''CREATE TABLE IF NOT EXISTS forex_quotes
                  (timestamp TEXT, pair TEXT, rate REAL)''')
     c.execute('''CREATE TABLE IF NOT EXISTS structural_analyses
@@ -34,12 +42,41 @@ def get_db_connection():
     return sqlite3.connect("arc_os.db")
 
 # ------------------------------------------------------------------
-# AUTHENTICATION (FIX 2 – WORKING LOGIN)
+# AUTHENTICATION & USER MANAGEMENT (DB + fallback)
 # ------------------------------------------------------------------
-USERS = {
-    "admin": hashlib.sha256("arc2024".encode()).hexdigest(),
+# Fallback hardcoded users for compatibility (will be checked after DB)
+FALLBACK_USERS = {
     "demo": hashlib.sha256("demo".encode()).hexdigest()
 }
+
+def authenticate(username, password):
+    """Check user against DB first, then fallback dict."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT password_hash, role FROM users WHERE username=?", (username,))
+    row = c.fetchone()
+    if row:
+        db_hash, role = row
+        if hashlib.sha256(password.encode()).hexdigest() == db_hash:
+            return True, role
+    # Fallback to hardcoded
+    if username in FALLBACK_USERS:
+        if hashlib.sha256(password.encode()).hexdigest() == FALLBACK_USERS[username]:
+            return True, "user"
+    return False, None
+
+def add_user(username, password, role="user"):
+    """Add a new user to the database. Returns success message or error."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        pwd_hash = hashlib.sha256(password.encode()).hexdigest()
+        c.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
+                  (username, pwd_hash, role))
+        conn.commit()
+        return True, f"User '{username}' added successfully."
+    except sqlite3.IntegrityError:
+        return False, "Username already exists."
 
 def login():
     st.markdown("<h1 style='text-align: center;'>🔐 Arc OS Pro Login</h1>", unsafe_allow_html=True)
@@ -50,16 +87,14 @@ def login():
             password = st.text_input("Password", type="password")
             submitted = st.form_submit_button("Login")
             if submitted:
-                if username in USERS:
-                    hashed = hashlib.sha256(password.encode()).hexdigest()
-                    if hashed == USERS[username]:
-                        st.session_state.authenticated = True
-                        st.session_state.username = username
-                        st.rerun()
-                    else:
-                        st.error("Invalid password")
+                success, role = authenticate(username, password)
+                if success:
+                    st.session_state.authenticated = True
+                    st.session_state.username = username
+                    st.session_state.role = role
+                    st.rerun()
                 else:
-                    st.error("Invalid username")
+                    st.error("Invalid username or password")
 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
@@ -70,10 +105,11 @@ if not st.session_state.authenticated:
 def logout():
     st.session_state.authenticated = False
     st.session_state.pop("username", None)
+    st.session_state.pop("role", None)
     st.rerun()
 
 # ------------------------------------------------------------------
-# FOREX ENGINE (Real + DB storage)
+# FOREX ENGINE (Fixed for unsupported currencies)
 # ------------------------------------------------------------------
 class ForexEngine:
     PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "UGX/USD", "KES/USD", "SSP/USD"]
@@ -84,32 +120,41 @@ class ForexEngine:
 
     @staticmethod
     def fetch_latest_rates():
+        """Fetch rates from Frankfurter API. Returns dict of pair->rate, missing pairs set to None."""
+        # Collect all unique currencies needed
         currencies = set()
         for base, target in ForexEngine.BASE_CURRENCIES.values():
             currencies.update([base, target])
         currencies_str = ",".join(currencies)
         url = f"https://api.frankfurter.app/latest?from=EUR&to={currencies_str}"
+        live_rates = {}
         try:
             resp = requests.get(url, timeout=10)
             resp.raise_for_status()
             data = resp.json()
-            rates = data["rates"]
-            eur_to = {cur: rates[cur] for cur in currencies}
-            live_rates = {}
+            eur_to = data["rates"]
+            # If a currency is missing from ECB rates, eur_to won't have it.
+            # We'll handle missing currencies gracefully.
             for pair, (base, target) in ForexEngine.BASE_CURRENCIES.items():
                 if base == target:
                     rate = 1.0
                 elif base == "EUR":
-                    rate = eur_to[target]
+                    rate = eur_to.get(target)
                 elif target == "EUR":
-                    rate = 1.0 / eur_to[base]
+                    eur_base = eur_to.get(base)
+                    rate = 1.0 / eur_base if eur_base else None
                 else:
-                    rate = eur_to[target] / eur_to[base]
-                live_rates[pair] = round(rate, 4)
-            return live_rates
+                    eur_base = eur_to.get(base)
+                    eur_target = eur_to.get(target)
+                    if eur_base and eur_target:
+                        rate = eur_target / eur_base
+                    else:
+                        rate = None
+                live_rates[pair] = round(rate, 4) if rate is not None else None
         except Exception as e:
-            st.warning(f"Live fetch failed ({e}), using simulated data.")
+            st.warning(f"Live fetch failed: {e}. Using simulated data for all pairs.")
             return None
+        return live_rates
 
     @staticmethod
     def get_live_data(minutes=60, use_real=True, store_db=True):
@@ -121,15 +166,23 @@ class ForexEngine:
                 times = [now - timedelta(minutes=i) for i in range(minutes)][::-1]
                 data = {"Time": times}
                 for pair in ForexEngine.PAIRS:
-                    base = live[pair]
-                    vol = base * 0.0002
+                    if live[pair] is not None:
+                        base = live[pair]
+                        vol = base * 0.0002
+                    else:
+                        # Fall back to a reasonable default for missing pairs
+                        defaults = {"EUR/USD":1.08,"GBP/USD":1.26,"USD/JPY":144.5,
+                                    "UGX/USD":3750,"KES/USD":145,"SSP/USD":1100}
+                        base = defaults.get(pair, 1.0)
+                        vol = base * 0.001  # higher vol for simulated
+                        st.info(f"Using simulated data for {pair} (currency not available in live feed).")
                     prices = base + np.cumsum(np.random.normal(0, vol, minutes))
                     data[pair] = np.round(np.maximum(prices, 0.0001), 4)
                 df = pd.DataFrame(data)
                 if store_db:
                     ForexEngine._store_quotes(live)
                 return df
-        # Fallback simulated
+        # Fully simulated fallback
         return ForexEngine._simulated_data(minutes)
 
     @staticmethod
@@ -152,7 +205,8 @@ class ForexEngine:
         c = conn.cursor()
         ts = datetime.now().isoformat()
         for pair, rate in rates.items():
-            c.execute("INSERT INTO forex_quotes VALUES (?, ?, ?)", (ts, pair, rate))
+            if rate is not None:
+                c.execute("INSERT INTO forex_quotes VALUES (?, ?, ?)", (ts, pair, rate))
         conn.commit()
 
     @staticmethod
@@ -162,7 +216,7 @@ class ForexEngine:
             f"SELECT timestamp, rate FROM forex_quotes WHERE pair='{pair}' ORDER BY timestamp DESC LIMIT {limit}",
             conn)
         df["timestamp"] = pd.to_datetime(df["timestamp"])
-        return df.iloc[::-1]  # chronological
+        return df.iloc[::-1]
 
     @staticmethod
     def get_summary(df):
@@ -202,7 +256,7 @@ class ForexEngine:
         return pd.DataFrame({"Time": times, "Volume": volume})
 
 # ------------------------------------------------------------------
-# ARCHITECTURAL ENGINE (Eurocode + DB)
+# ARCHITECTURAL ENGINE
 # ------------------------------------------------------------------
 class SaiArchitect:
     MATERIALS = {
@@ -268,102 +322,48 @@ class SaiArchitect:
         return df
 
 # ------------------------------------------------------------------
-# 3D VIEWER (Three.js)
+# 3D VIEWER
 # ------------------------------------------------------------------
 def render_3d_viewer(beam_length, load_magnitude, load_type, material):
     html_code = f"""
     <!DOCTYPE html>
-    <html>
-    <head>
-        <style> body {{ margin: 0; overflow: hidden; }} </style>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    </head>
-    <body>
-    <script>
-        const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x111122);
+    <html><head><style> body {{ margin:0; overflow:hidden; }} </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script></head>
+    <body><script>
+        const scene = new THREE.Scene(); scene.background = new THREE.Color(0x111122);
         const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 1000);
-        camera.position.set(8, 5, 8);
-        camera.lookAt(0, 2, 0);
+        camera.position.set(8,5,8); camera.lookAt(0,2,0);
         const renderer = new THREE.WebGLRenderer({{ antialias: true }});
         renderer.setSize(window.innerWidth, window.innerHeight);
         document.body.appendChild(renderer.domElement);
-
-        const ambientLight = new THREE.AmbientLight(0x404080);
-        scene.add(ambientLight);
-        const dirLight = new THREE.DirectionalLight(0xffffff, 1);
-        dirLight.position.set(1, 2, 1);
-        scene.add(dirLight);
-
-        const beamGeometry = new THREE.BoxGeometry({beam_length}, 0.2, 0.3);
-        const beamMat = new THREE.MeshPhongMaterial({{ color: 0x3a7bd5, emissive: 0x001122 }});
-        const beam = new THREE.Mesh(beamGeometry, beamMat);
-        beam.position.y = 2;
-        scene.add(beam);
-
-        const supportMat = new THREE.MeshPhongMaterial({{ color: 0x00d2ff, emissive: 0x002222 }});
-        const leftSupport = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 1.5, 8), supportMat);
-        leftSupport.position.set(-{beam_length/2 + 0.2}, 1.25, 0);
-        scene.add(leftSupport);
-        const rightSupport = leftSupport.clone();
-        rightSupport.position.x = {beam_length/2 + 0.2};
-        scene.add(rightSupport);
-
-        const arrowDir = new THREE.Vector3(0, -1, 0);
-        const arrowOrigin = new THREE.Vector3(0, 2.2, 0);
-        const arrow = new THREE.ArrowHelper(arrowDir, arrowOrigin, 1.2, 0xff4b2b, 0.3, 0.2);
-        scene.add(arrow);
-
-        const canvas = document.createElement('canvas');
-        canvas.width = 128; canvas.height = 64;
-        const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 20px Arial';
-        ctx.textAlign = 'center';
-        ctx.fillText('{load_magnitude} kN', 64, 35);
+        scene.add(new THREE.AmbientLight(0x404080));
+        const dirLight = new THREE.DirectionalLight(0xffffff,1); dirLight.position.set(1,2,1); scene.add(dirLight);
+        const beamGeo = new THREE.BoxGeometry({beam_length},0.2,0.3);
+        const beam = new THREE.Mesh(beamGeo, new THREE.MeshPhongMaterial({{ color:0x3a7bd5, emissive:0x001122 }}));
+        beam.position.y=2; scene.add(beam);
+        const supMat = new THREE.MeshPhongMaterial({{ color:0x00d2ff, emissive:0x002222 }});
+        const leftSup = new THREE.Mesh(new THREE.CylinderGeometry(0.3,0.3,1.5,8), supMat);
+        leftSup.position.set(-{beam_length/2+0.2},1.25,0); scene.add(leftSup);
+        const rightSup = leftSup.clone(); rightSup.position.x={beam_length/2+0.2}; scene.add(rightSup);
+        const arrow = new THREE.ArrowHelper(new THREE.Vector3(0,-1,0), new THREE.Vector3(0,2.2,0), 1.2, 0xff4b2b, 0.3,0.2); scene.add(arrow);
+        const canvas = document.createElement('canvas'); canvas.width=128; canvas.height=64;
+        const ctx = canvas.getContext('2d'); ctx.fillStyle='#ffffff'; ctx.font='bold 20px Arial'; ctx.textAlign='center';
+        ctx.fillText('{load_magnitude} kN',64,35);
         const texture = new THREE.CanvasTexture(canvas);
-        const spriteMaterial = new THREE.SpriteMaterial({{ map: texture }});
-        const sprite = new THREE.Sprite(spriteMaterial);
-        sprite.position.set(0.8, 2.6, 0);
-        sprite.scale.set(1.5, 0.75, 1);
-        scene.add(sprite);
-
-        const gridHelper = new THREE.GridHelper(10, 20, 0x336699, 0x224466);
-        scene.add(gridHelper);
-
-        let isDragging = false, previousMouse = {{ x: 0, y: 0 }};
-        renderer.domElement.addEventListener('mousedown', e => {{ isDragging = true; previousMouse.x = e.clientX; previousMouse.y = e.clientY; }});
-        renderer.domElement.addEventListener('mouseup', () => isDragging = false);
-        renderer.domElement.addEventListener('mousemove', e => {{
-            if (isDragging) {{
-                const deltaX = e.clientX - previousMouse.x;
-                const deltaY = e.clientY - previousMouse.y;
-                camera.position.x += deltaX * 0.01;
-                camera.position.y -= deltaY * 0.01;
-                camera.lookAt(0, 2, 0);
-                previousMouse.x = e.clientX;
-                previousMouse.y = e.clientY;
-            }}
-        }});
-        renderer.domElement.addEventListener('wheel', e => {{
-            camera.position.z += e.deltaY * 0.01;
-            camera.lookAt(0, 2, 0);
-            e.preventDefault();
-        }});
-
-        function animate() {{
-            requestAnimationFrame(animate);
-            renderer.render(scene, camera);
-        }}
-        animate();
-    </script>
-    </body>
-    </html>
-    """
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({{ map:texture }}));
+        sprite.position.set(0.8,2.6,0); sprite.scale.set(1.5,0.75,1); scene.add(sprite);
+        scene.add(new THREE.GridHelper(10,20,0x336699,0x224466));
+        let isDragging=false, prev={{x:0,y:0}};
+        renderer.domElement.addEventListener('mousedown',e=>{{ isDragging=true; prev.x=e.clientX; prev.y=e.clientY; }});
+        renderer.domElement.addEventListener('mouseup',()=>isDragging=false);
+        renderer.domElement.addEventListener('mousemove',e=>{{ if(isDragging){{ camera.position.x+=(e.clientX-prev.x)*0.01; camera.position.y-=(e.clientY-prev.y)*0.01; camera.lookAt(0,2,0); prev.x=e.clientX; prev.y=e.clientY; }} }});
+        renderer.domElement.addEventListener('wheel',e=>{{ camera.position.z+=e.deltaY*0.01; camera.lookAt(0,2,0); e.preventDefault(); }});
+        function animate(){{ requestAnimationFrame(animate); renderer.render(scene,camera); }} animate();
+    </script></body></html>"""
     st.components.v1.html(html_code, height=350)
 
 # ------------------------------------------------------------------
-# STREAMLIT APP (Main)
+# MAIN APP
 # ------------------------------------------------------------------
 st.set_page_config(page_title="Arc OS Pro", layout="wide")
 
@@ -371,44 +371,20 @@ def load_css():
     st.markdown("""
     <style>
         .stApp { background: linear-gradient(135deg, #0f0c29, #302b63, #24243e); color: #e0e0e0; }
-        section[data-testid="stSidebar"] {
-            background: rgba(20,20,40,0.8); backdrop-filter: blur(10px); border-right: 1px solid rgba(255,255,255,0.1);
-        }
-        h1, h2, h3 {
-            font-family: 'Segoe UI', sans-serif; font-weight: 600;
-            background: linear-gradient(90deg, #00d2ff, #3a7bd5);
-            -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
-        }
-        .glass-card {
-            background: rgba(255,255,255,0.05); backdrop-filter: blur(15px); border-radius: 16px;
-            border: 1px solid rgba(255,255,255,0.1); padding: 20px; margin: 10px 0; box-shadow: 0 8px 32px rgba(0,0,0,0.37);
-        }
-        .metric-box {
-            background: rgba(255,255,255,0.08); border-radius: 12px; padding: 15px; margin: 5px 0;
-            text-align: center; font-weight: bold; border: 1px solid rgba(255,255,255,0.15);
-        }
-        div.stButton > button {
-            background: linear-gradient(45deg, #ff416c, #ff4b2b); border: none; color: white;
-            padding: 12px 28px; font-size: 16px; font-weight: bold; border-radius: 50px;
-            box-shadow: 0 0 20px rgba(255,75,43,0.5); transition: all 0.3s ease; cursor: pointer;
-            letter-spacing: 0.5px; text-transform: uppercase; width: 100%; border: 1px solid rgba(255,255,255,0.2);
-        }
-        div.stButton > button:hover {
-            transform: translateY(-2px); box-shadow: 0 0 30px rgba(255,75,43,0.8);
-            background: linear-gradient(45deg, #ff4b2b, #ff416c); color: white;
-        }
-        div.stButton > button.arch {
-            background: linear-gradient(45deg, #00b4db, #0083b0); box-shadow: 0 0 20px rgba(0,180,219,0.5);
-        }
-        div.stButton > button.arch:hover {
-            box-shadow: 0 0 30px rgba(0,180,219,0.8); background: linear-gradient(45deg, #0083b0, #00b4db);
-        }
-    </style>
-    """, unsafe_allow_html=True)
+        section[data-testid="stSidebar"] { background: rgba(20,20,40,0.8); backdrop-filter: blur(10px); border-right: 1px solid rgba(255,255,255,0.1); }
+        h1,h2,h3 { font-family: 'Segoe UI', sans-serif; font-weight: 600; background: linear-gradient(90deg, #00d2ff, #3a7bd5); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
+        .glass-card { background: rgba(255,255,255,0.05); backdrop-filter: blur(15px); border-radius:16px; border:1px solid rgba(255,255,255,0.1); padding:20px; margin:10px 0; box-shadow:0 8px 32px rgba(0,0,0,0.37); }
+        .metric-box { background: rgba(255,255,255,0.08); border-radius:12px; padding:15px; margin:5px 0; text-align:center; font-weight:bold; border:1px solid rgba(255,255,255,0.15); }
+        div.stButton > button { background: linear-gradient(45deg, #ff416c, #ff4b2b); border:none; color:white; padding:12px 28px; font-size:16px; font-weight:bold; border-radius:50px; box-shadow:0 0 20px rgba(255,75,43,0.5); transition:all 0.3s ease; cursor:pointer; letter-spacing:0.5px; text-transform:uppercase; width:100%; border:1px solid rgba(255,255,255,0.2); }
+        div.stButton > button:hover { transform:translateY(-2px); box-shadow:0 0 30px rgba(255,75,43,0.8); background:linear-gradient(45deg, #ff4b2b, #ff416c); color:white; }
+        div.stButton > button.arch { background: linear-gradient(45deg, #00b4db, #0083b0); box-shadow:0 0 20px rgba(0,180,219,0.5); }
+        div.stButton > button.arch:hover { box-shadow:0 0 30px rgba(0,180,219,0.8); background:linear-gradient(45deg, #0083b0, #00b4db); }
+    </style>""", unsafe_allow_html=True)
 
 load_css()
 init_db()
 
+# Session state
 if 'forex_data' not in st.session_state:
     st.session_state.forex_data = ForexEngine.get_live_data(use_real=True)
 if 'forex_volume' not in st.session_state:
@@ -418,14 +394,33 @@ if 'arch_result' not in st.session_state:
 if 'use_real_forex' not in st.session_state:
     st.session_state.use_real_forex = True
 
+# Sidebar
 with st.sidebar:
     st.markdown("## ⚙️ Arc OS Pro")
-    st.write(f"👤 {st.session_state.username}")
+    st.write(f"👤 {st.session_state.username} ({st.session_state.role})")
     mode = st.radio("🧠 Engine", ["💱 Forex Pro", "🏗️ Arch Pro"])
     st.checkbox("Real‑time forex", value=st.session_state.use_real_forex, key="use_real_forex")
+    st.markdown("---")
+    # User management (admin only)
+    if st.session_state.role == "admin":
+        with st.expander("👥 User Management"):
+            st.markdown("### Add New User")
+            with st.form("add_user_form"):
+                new_user = st.text_input("Username")
+                new_pass = st.text_input("Password", type="password")
+                new_role = st.selectbox("Role", ["user", "admin"])
+                if st.form_submit_button("Add User"):
+                    if new_user and new_pass:
+                        success, msg = add_user(new_user, new_pass, new_role)
+                        if success:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
+                    else:
+                        st.error("Username and password required.")
     if st.button("🚪 Logout"):
         logout()
-    st.caption("v4.2 · Fixed Auth")
+    st.caption("v5.0 · Live + DB Users")
 
 st.markdown("<h1 style='text-align: center;'>🌌 Arc | AI Operating System Pro</h1>", unsafe_allow_html=True)
 
@@ -475,7 +470,6 @@ else:
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.subheader("🏛️ Arch Pro: 3D Interactive Analysis")
     col_input, col_viz = st.columns([1, 2])
-
     with col_input:
         st.markdown("### 📐 Design Parameters")
         beam_length = st.slider("Beam Length (m)", 2.0, 15.0, 5.0, 0.5)
@@ -488,12 +482,10 @@ else:
             load_min, load_max, load_def = 1.0, 500.0, 100.0
         load_magnitude = st.slider(load_label, load_min, load_max, load_def, 1.0)
         material = st.selectbox("Material", list(SaiArchitect.MATERIALS.keys()))
-
         if st.button("⚡ Run Eurocode Check", key="run_analysis"):
             st.session_state.arch_result = SaiArchitect.structural_analysis(
                 beam_length, load_magnitude, load_type, material
             )
-
         if st.session_state.arch_result:
             res = st.session_state.arch_result
             st.metric("Status", res["Status"])
@@ -504,19 +496,14 @@ else:
             with tab2:
                 st.metric("Bending Stress", f"{res['Bending Stress (MPa)']} MPa")
                 st.metric("Shear Stress", f"{res['Shear Stress (MPa)']} MPa")
-                st.metric("Deflection", f"{res['Deflection (mm)']} mm",
-                          delta=f"Limit {res['Allowable Deflection (mm)']} mm")
-                st.metric("Moment Util.", f"{res['Moment Util.']}",
-                          delta="OK" if res['Moment Util.']<=1 else "FAIL")
-
+                st.metric("Deflection", f"{res['Deflection (mm)']} mm", delta=f"Limit {res['Allowable Deflection (mm)']} mm")
+                st.metric("Moment Util.", f"{res['Moment Util.']}", delta="OK" if res['Moment Util.']<=1 else "FAIL")
             st.markdown("### 📋 Recent Analyses (from DB)")
             hist = SaiArchitect.get_history(5)
-            st.dataframe(hist[["timestamp", "beam_length", "load_magnitude", "material", "status"]], use_container_width=True)
-
+            st.dataframe(hist[["timestamp","beam_length","load_magnitude","material","status"]], use_container_width=True)
     with col_viz:
         st.markdown("### 🧊 Interactive 3D Model")
         render_3d_viewer(beam_length, load_magnitude, load_type, material)
-
     st.markdown('</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
