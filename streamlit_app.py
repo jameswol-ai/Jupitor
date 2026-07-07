@@ -35,39 +35,23 @@ def get_db_connection():
     return sqlite3.connect("arc_os.db")
 
 # ------------------------------------------------------------------
-# AUTHENTICATION
+# AUTHENTICATION (TEMPORARILY BYPASSED)
 # ------------------------------------------------------------------
-# Demo users (in production use hashed passwords and a proper DB)
-USERS = {
-    "admin": hashlib.sha256("arc2024".encode()).hexdigest(),
-    "demo": hashlib.sha256("demo".encode()).hexdigest()
-}
-
-def login():
-    st.markdown("<h1 style='text-align: center;'>🔐 Arc OS Pro Login</h1>", unsafe_allow_html=True)
-    with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Login")
-        if submitted:
-            if username in USERS and hashlib.sha256(password.encode()).hexdigest() == USERS[username]:
-                st.session_state.authenticated = True
-                st.session_state.username = username
-                st.rerun()
-            else:
-                st.error("Invalid credentials")
-
-def logout():
-    st.session_state.authenticated = False
-    st.session_state.pop("username", None)
-    st.rerun()
-
+# Force logged in – no login screen appears.
 if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
+    st.session_state.authenticated = True
+    st.session_state.username = "demo"
 
-if not st.session_state.authenticated:
-    login()
-    st.stop()
+# If you want to re-enable authentication later, replace the lines above with the following block:
+# USERS = {
+#     "admin": hashlib.sha256("arc2024".encode()).hexdigest(),
+#     "demo": hashlib.sha256("demo".encode()).hexdigest()
+# }
+# if "authenticated" not in st.session_state:
+#     st.session_state.authenticated = False
+# if not st.session_state.authenticated:
+#     login()
+#     st.stop()
 
 # ------------------------------------------------------------------
 # FOREX ENGINE (Real + DB storage)
@@ -269,7 +253,6 @@ class SaiArchitect:
 # 3D VIEWER (Three.js HTML component)
 # ------------------------------------------------------------------
 def render_3d_viewer(beam_length, load_magnitude, load_type, material):
-    # Generate a simple Three.js scene of a supported beam with load arrow
     html_code = f"""
     <!DOCTYPE html>
     <html>
@@ -433,9 +416,8 @@ with st.sidebar:
     st.write(f"👤 {st.session_state.username}")
     mode = st.radio("🧠 Engine", ["💱 Forex Pro", "🏗️ Arch Pro"])
     st.checkbox("Real‑time forex", value=st.session_state.use_real_forex, key="use_real_forex")
-    if st.button("🚪 Logout"):
-        logout()
-    st.caption("v4.0 · Auth + DB + 3D")
+    # Logout button removed (authentication bypassed)
+    st.caption("v4.1 · Auth bypassed (demo mode)")
 
 st.markdown("<h1 style='text-align: center;'>🌌 Arc | AI Operating System Pro</h1>", unsafe_allow_html=True)
 
