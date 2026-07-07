@@ -8,7 +8,7 @@ import hashlib
 import json
 
 # ------------------------------------------------------------------
-# DATABASE SETUP (with email column migration)
+# DATABASE SETUP (MUST RUN FIRST)
 # ------------------------------------------------------------------
 def init_db():
     conn = sqlite3.connect("arc_os.db")
@@ -46,6 +46,9 @@ def init_db():
 
 def get_db_connection():
     return sqlite3.connect("arc_os.db")
+
+# Initialize database now – before any login or session state that uses it
+init_db()
 
 # ------------------------------------------------------------------
 # AUTHENTICATION & USER MANAGEMENT
@@ -122,6 +125,9 @@ def login():
             st.session_state.show_registration = True
             st.rerun()
 
+# ------------------------------------------------------------------
+# SESSION STATE INIT
+# ------------------------------------------------------------------
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 if "show_registration" not in st.session_state:
@@ -151,27 +157,13 @@ class ForexEngine:
 
     @staticmethod
     def fetch_latest_rates():
-        """
-        Primary source: exchangerate-api.com (free, no key, supports UGX/KES/SSP).
-        Fallback: Frankfurter API, then simulated.
-        Returns dict pair -> rate or None.
-        """
         live_rates = {}
-
-        # --- Primary: ExchangeRate-API (base=USD) ---
+        # Primary: ExchangeRate-API (base=USD)
         try:
             resp = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=10)
             resp.raise_for_status()
             data = resp.json()["rates"]
-            # data contains: EUR, GBP, JPY, UGX, KES, SSP, etc. (relative to USD)
             usd_to = data
-            # Compute all pairs
-            # EUR/USD = how many USD per 1 EUR? = 1 / usd_to["EUR"]
-            # USD/JPY = usd_to["JPY"]
-            # For UGX/USD: USD to UGX = usd_to["UGX"]
-            # KES/USD = usd_to["KES"]
-            # SSP/USD = usd_to["SSP"]
-            # For EUR/USD: rate = 1 / usd_to["EUR"]
             live_rates["EUR/USD"] = round(1 / usd_to["EUR"], 4)
             live_rates["GBP/USD"] = round(1 / usd_to["GBP"], 4)
             live_rates["USD/JPY"] = round(usd_to["JPY"], 4)
@@ -182,7 +174,7 @@ class ForexEngine:
         except Exception as e:
             st.warning(f"ExchangeRate-API failed ({e}), trying Frankfurter fallback...")
 
-        # --- Fallback: Frankfurter (may lack UGX/KES/SSP) ---
+        # Fallback: Frankfurter (may lack UGX/KES/SSP)
         currencies = {"EUR","USD","GBP","JPY","UGX","KES","SSP"}
         currencies_str = ",".join(currencies)
         url = f"https://api.frankfurter.app/latest?from=EUR&to={currencies_str}"
@@ -195,7 +187,6 @@ class ForexEngine:
                 if pair == "EUR/USD":
                     rate = eur_to.get("USD")
                 elif pair == "GBP/USD":
-                    # cross through EUR
                     eur_gbp = eur_to.get("GBP")
                     eur_usd = eur_to.get("USD")
                     rate = eur_usd / eur_gbp if eur_gbp else None
@@ -204,7 +195,6 @@ class ForexEngine:
                     eur_usd = eur_to.get("USD")
                     rate = eur_jpy / eur_usd if eur_usd else None
                 else:  # UGX, KES, SSP are USD-based
-                    # These currencies might not be available, set None
                     rate = eur_to.get(pair.split("/")[1])
                     if rate and eur_to.get("USD"):
                         rate = rate / eur_to["USD"]
@@ -225,7 +215,6 @@ class ForexEngine:
                 now = datetime.now()
                 times = [now - timedelta(minutes=i) for i in range(minutes)][::-1]
                 data = {"Time": times}
-                # For pairs that are None in live, use simulated defaults
                 defaults = {"EUR/USD":1.08,"GBP/USD":1.26,"USD/JPY":144.5,
                             "UGX/USD":3750,"KES/USD":145,"SSP/USD":1100}
                 for pair in ForexEngine.PAIRS:
@@ -465,7 +454,7 @@ class StructuralModel:
         return html
 
 # ------------------------------------------------------------------
-# STREAMLIT APP
+# STREAMLIT APP (UI after login)
 # ------------------------------------------------------------------
 st.set_page_config(page_title="Arc OS Pro", layout="wide")
 
@@ -483,8 +472,8 @@ def load_css():
     </style>""", unsafe_allow_html=True)
 
 load_css()
-init_db()
 
+# Ensure role exists after login
 if 'role' not in st.session_state:
     conn = get_db_connection()
     c = conn.cursor()
@@ -492,6 +481,7 @@ if 'role' not in st.session_state:
     row = c.fetchone()
     st.session_state.role = row[0] if row else "user"
 
+# Session data defaults
 if 'forex_data' not in st.session_state:
     st.session_state.forex_data = ForexEngine.get_live_data(use_real=True)
 if 'forex_volume' not in st.session_state:
@@ -539,7 +529,7 @@ with st.sidebar:
 
     if st.button("🚪 Logout"):
         logout()
-    st.caption("v7.0 · Live Forex + Full Structural")
+    st.caption("v7.1 · Database init fixed")
 
 st.markdown("<h1 style='text-align: center;'>🌌 Arc | AI Operating System Pro</h1>", unsafe_allow_html=True)
 
