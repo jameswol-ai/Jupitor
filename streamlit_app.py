@@ -8,6 +8,7 @@ import hashlib
 import json
 import smtplib
 from email.message import EmailMessage
+from st_javascript import st_javascript
 
 # ------------------------------------------------------------------
 # DATABASE SETUP (MUST RUN FIRST)
@@ -43,6 +44,11 @@ def init_db():
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   username TEXT, type TEXT, subtype TEXT,
                   params TEXT, timestamp TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS wallet_transactions
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  username TEXT, type TEXT, amount REAL,
+                  phone TEXT, provider TEXT, reference TEXT,
+                  status TEXT, timestamp TEXT)''')
     conn.commit()
     return conn
 
@@ -178,6 +184,51 @@ def logout():
     st.rerun()
 
 # ------------------------------------------------------------------
+# MOBILE MONEY WALLET (Simulated East‑African Integration)
+# ------------------------------------------------------------------
+class MobileWallet:
+    PROVIDERS = ["M-Pesa (Kenya)", "Airtel Money (Uganda)", "MTN MoMo (Uganda)"]
+
+    @staticmethod
+    def get_balance(username):
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT SUM(CASE WHEN type='deposit' THEN amount ELSE -amount END) FROM wallet_transactions WHERE username=? AND status='completed'",
+                  (username,))
+        row = c.fetchone()
+        return row[0] if row[0] is not None else 0.0
+
+    @staticmethod
+    def deposit_request(username, phone, amount, provider):
+        """Simulate STK push: create a pending transaction and return a reference."""
+        ref = f"ARC{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('''INSERT INTO wallet_transactions
+                     (username, type, amount, phone, provider, reference, status, timestamp)
+                     VALUES (?, 'deposit', ?, ?, ?, ?, 'pending', ?)''',
+                  (username, amount, phone, provider, ref, datetime.now().isoformat()))
+        conn.commit()
+        return ref
+
+    @staticmethod
+    def confirm_deposit(reference):
+        """Simulate user entering PIN and completing the transaction."""
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("UPDATE wallet_transactions SET status='completed' WHERE reference=?", (reference,))
+        conn.commit()
+        return True
+
+    @staticmethod
+    def get_transactions(username, limit=20):
+        conn = get_db_connection()
+        df = pd.read_sql_query(
+            "SELECT * FROM wallet_transactions WHERE username=? ORDER BY timestamp DESC LIMIT ?",
+            conn, params=(username, limit))
+        return df
+
+# ------------------------------------------------------------------
 # FOREX ENGINE (Real-time via ExchangeRate-API)
 # ------------------------------------------------------------------
 class ForexEngine:
@@ -298,6 +349,68 @@ class ForexEngine:
         return pd.DataFrame({"Time": times, "Volume": volume})
 
 # ------------------------------------------------------------------
+# AI TRADING SIGNALS (RSI + MACD)
+# ------------------------------------------------------------------
+class TradingSignals:
+    @staticmethod
+    def compute_rsi(prices, period=14):
+        deltas = np.diff(prices)
+        seed = deltas[:period+1]
+        up = seed[seed >= 0].sum() / period
+        down = -seed[seed < 0].sum() / period
+        rs = up / down if down != 0 else 0
+        rsi = np.zeros_like(prices)
+        rsi[:period] = 100. - 100. / (1. + rs)
+        for i in range(period, len(prices)):
+            delta = deltas[i-1]
+            if delta > 0:
+                upval = delta
+                downval = 0
+            else:
+                upval = 0
+                downval = -delta
+            up = (up * (period-1) + upval) / period
+            down = (down * (period-1) + downval) / period
+            rs = up / down if down != 0 else 0
+            rsi[i] = 100. - 100. / (1. + rs)
+        return rsi
+
+    @staticmethod
+    def compute_macd(prices, fast=12, slow=26, signal=9):
+        ema_fast = pd.Series(prices).ewm(span=fast, adjust=False).mean()
+        ema_slow = pd.Series(prices).ewm(span=slow, adjust=False).mean()
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+        histogram = macd_line - signal_line
+        return macd_line.values, signal_line.values, histogram.values
+
+    @staticmethod
+    def generate_signals(df, pair):
+        """Return buy/sell signals based on RSI and MACD."""
+        prices = df[pair].values
+        if len(prices) < 35:
+            return []
+        rsi = TradingSignals.compute_rsi(prices)
+        macd, signal, hist = TradingSignals.compute_macd(prices)
+        signals = []
+        last_rsi = rsi[-1]
+        last_macd = macd[-1]
+        last_signal = signal[-1]
+        prev_macd = macd[-2]
+        prev_signal = signal[-2]
+        # RSI condition
+        if last_rsi < 30:
+            signals.append(("BUY", "RSI oversold"))
+        elif last_rsi > 70:
+            signals.append(("SELL", "RSI overbought"))
+        # MACD crossover
+        if prev_macd < prev_signal and last_macd > last_signal:
+            signals.append(("BUY", "MACD bullish crossover"))
+        elif prev_macd > prev_signal and last_macd < last_signal:
+            signals.append(("SELL", "MACD bearish crossover"))
+        return signals
+
+# ------------------------------------------------------------------
 # FOREX & CRYPTO FORECAST ENGINE (Daily, Weekly, Monthly)
 # ------------------------------------------------------------------
 class ForexForecast:
@@ -312,14 +425,12 @@ class ForexForecast:
 
     @staticmethod
     def generate_daily_history(days=90):
-        """Generate synthetic daily closing prices for all pairs."""
         np.random.seed(123)
         dates = pd.date_range(end=datetime.now(), periods=days, freq='D')
         df = pd.DataFrame(index=dates)
         for pair in ForexEngine.PAIRS:
             start = ForexForecast.BASE_PRICES[pair]
             vol = ForexForecast.DAILY_VOL[pair] * start
-            # random walk with slight drift
             drift = 0.0001 * start if pair in ["EUR/USD","GBP/USD"] else 0.01
             rets = np.random.normal(drift, vol, days)
             prices = start * np.exp(np.cumsum(rets / start))
@@ -328,11 +439,10 @@ class ForexForecast:
 
     @staticmethod
     def forecast(df, horizon_days, pair):
-        """Linear extrapolation of last 30 days."""
         series = df[pair].tail(30)
         x = np.arange(len(series))
         y = series.values
-        coeffs = np.polyfit(x, y, 1)   # linear trend
+        coeffs = np.polyfit(x, y, 1)
         last_idx = len(series) - 1
         future_x = np.array([last_idx + d for d in range(1, horizon_days+1)])
         forecast_y = np.polyval(coeffs, future_x)
@@ -346,19 +456,18 @@ class CryptoForecast:
 
     @staticmethod
     def generate_daily_history(days=90, live_prices=None):
-        """Synthetic daily history, optionally updated with live price as last point."""
         np.random.seed(456)
         dates = pd.date_range(end=datetime.now(), periods=days, freq='D')
         df = pd.DataFrame(index=dates)
         for coin in CryptoForecast.COINS:
             start = CryptoForecast.BASE_PRICES[coin]
             vol = CryptoForecast.DAILY_VOL[coin]
-            drift = 0.0005 * start  # small upward bias
+            drift = 0.0005 * start
             rets = np.random.normal(drift, vol, days)
             prices = start + np.cumsum(rets)
             prices = np.maximum(prices, 0.01)
             if live_prices and coin in live_prices and live_prices[coin] is not None:
-                prices[-1] = live_prices[coin]   # anchor last point to live
+                prices[-1] = live_prices[coin]
             df[coin] = np.round(prices, 2)
         return df
 
@@ -678,20 +787,93 @@ if 'forex_daily_hist' not in st.session_state:
 if 'crypto_live_prices' not in st.session_state:
     st.session_state.crypto_live_prices = CryptoEngine.fetch_prices()
 if 'crypto_daily_hist' not in st.session_state:
-    # Build lookup of live prices for anchoring
     live_dict = {}
     if st.session_state.crypto_live_prices is not None:
         for _, row in st.session_state.crypto_live_prices.iterrows():
-            # map name back to coin id
             for cid, name in CryptoEngine.NAMES.items():
                 if name == row["Coin"]:
                     live_dict[cid] = row["Price (USD)"]
     st.session_state.crypto_daily_hist = CryptoForecast.generate_daily_history(90, live_dict)
 
+# Voice command handling
+if 'voice_command' not in st.session_state:
+    st.session_state.voice_command = None
+
+# ------------------------------------------------------------------
+# VOICE COMMAND (Web Speech API via st_javascript)
+# ------------------------------------------------------------------
+def voice_command_ui():
+    col1, col2 = st.columns([0.9, 0.1])
+    with col2:
+        if st.button("🎤 Voice Command"):
+            # JavaScript to start speech recognition
+            js_code = """
+            <script>
+            (function() {
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                if (!SpeechRecognition) {
+                    alert("Voice recognition not supported in this browser.");
+                    return 'unsupported';
+                }
+                const recognition = new SpeechRecognition();
+                recognition.lang = 'en-US';
+                recognition.interimResults = false;
+                recognition.maxAlternatives = 1;
+                recognition.onresult = function(event) {
+                    const transcript = event.results[0][0].transcript.trim().toLowerCase();
+                    window.parent.postMessage({type: 'streamlit:setComponentValue', value: transcript}, '*');
+                };
+                recognition.onerror = function(event) {
+                    window.parent.postMessage({type: 'streamlit:setComponentValue', value: 'error: ' + event.error}, '*');
+                };
+                recognition.start();
+            })();
+            </script>
+            """
+            result = st_javascript(js_code)
+            if result and result != "unsupported":
+                st.session_state.voice_command = result
+                st.rerun()
+
+    if st.session_state.voice_command:
+        cmd = st.session_state.voice_command.lower()
+        st.info(f"Voice command: {cmd}")
+        # Process command
+        mode_map = {
+            "forex": "💱 Forex Pro",
+            "structural": "🏗️ Structural Pro",
+            "crypto": "₿ Crypto Tracker",
+            "wallet": "💳 Mobile Wallet",
+        }
+        if cmd in mode_map:
+            st.session_state.mode = mode_map[cmd]
+            st.success(f"Switched to {mode_map[cmd]}")
+        elif "balance" in cmd:
+            st.session_state.mode = "💳 Mobile Wallet"
+            st.success("Showing wallet balance")
+        elif "forecast" in cmd:
+            st.session_state.mode = "💱 Forex Pro"
+            st.success("Opening forecasts")
+        elif "signal" in cmd:
+            st.session_state.mode = "💱 Forex Pro"
+            st.success("Opening trading signals")
+        elif "logout" in cmd:
+            logout()
+        else:
+            st.warning("Command not recognized. Try: forex, crypto, structural, wallet, forecast, signals, balance, logout")
+        st.session_state.voice_command = None
+
+# ------------------------------------------------------------------
+# SIDEBAR & MODE SELECTION
+# ------------------------------------------------------------------
 with st.sidebar:
     st.markdown("## ⚙️ Arc OS Pro")
     st.write(f"👤 {st.session_state.username} ({st.session_state.role})")
-    mode = st.radio("🧠 Engine", ["💱 Forex Pro", "🏗️ Structural Pro", "₿ Crypto Tracker"])
+    mode_options = ["💱 Forex Pro", "🏗️ Structural Pro", "₿ Crypto Tracker", "💳 Mobile Wallet"]
+    if 'mode' not in st.session_state:
+        st.session_state.mode = mode_options[0]
+    mode = st.radio("🧠 Engine", mode_options, index=mode_options.index(st.session_state.mode))
+    st.session_state.mode = mode
 
     st.markdown("---")
     if mode == "💱 Forex Pro":
@@ -726,9 +908,10 @@ with st.sidebar:
 
     if st.button("🚪 Logout"):
         logout()
-    st.caption("v8.1 · Forecasts + Email + Crypto")
+    st.caption("v9.0 · Wallet + Signals + Voice")
 
 st.markdown("<h1 style='text-align: center;'>🌌 Arc | AI Operating System Pro</h1>", unsafe_allow_html=True)
+voice_command_ui()   # Voice button at top
 
 # ====================== FOREX MODULE ======================
 if mode == "💱 Forex Pro":
@@ -763,6 +946,22 @@ if mode == "💱 Forex Pro":
     st.subheader("📅 Economic Calendar")
     st.table(ForexEngine.generate_economic_calendar())
 
+    # ---------- AI SIGNALS (RSI + MACD) ----------
+    with st.expander("📡 AI Trading Signals (RSI & MACD)", expanded=False):
+        st.markdown("Real‑time signals based on the 1‑minute live data.")
+        signal_pair = st.selectbox("Choose pair for signals", ForexEngine.PAIRS, key="signal_pair")
+        signals = TradingSignals.generate_signals(forex_df, signal_pair)
+        if signals:
+            for sig_type, reason in signals:
+                color = "green" if sig_type == "BUY" else "red"
+                st.markdown(f"<span style='color:{color}; font-weight:bold;'>{sig_type}</span> – {reason}", unsafe_allow_html=True)
+        else:
+            st.write("No strong signals at the moment.")
+        # Show RSI value
+        prices = forex_df[signal_pair].values
+        rsi = TradingSignals.compute_rsi(prices)
+        st.metric(f"RSI (14) for {signal_pair}", f"{rsi[-1]:.1f}")
+
     # ---------- FOREX FORECAST SECTION ----------
     st.subheader("🔮 Forex Forecasts (Daily, Weekly, Monthly)")
     forecast_horizon = st.radio("Forecast period", ["1 Day", "7 Days (Week)", "30 Days (Month)"], horizontal=True)
@@ -776,19 +975,16 @@ if mode == "💱 Forex Pro":
         fcast = ForexForecast.forecast(daily_hist, days, pair)
         forecast_table.append({"Pair": pair, "Latest": daily_hist[pair].iloc[-1],
                                "Forecast": fcast[-1], "Change": round(fcast[-1] - daily_hist[pair].iloc[-1], 4)})
-        # Prepare chart data: historical last 30 days + forecast
         hist_part = daily_hist[pair].tail(30)
         idx_hist = list(hist_part.index)
         idx_fut = pd.date_range(idx_hist[-1] + pd.Timedelta(days=1), periods=days, freq='D')
         combined = np.concatenate([hist_part.values, fcast])
         chart_data[pair] = pd.Series(combined, index=list(idx_hist)+list(idx_fut))
 
-    # Show forecast table
     fdf = pd.DataFrame(forecast_table)
     st.dataframe(fdf.style.applymap(lambda x: 'color: #00ff88' if isinstance(x, (int,float)) and x>0 else 'color: #ff4b4b',
                                     subset=['Change']), use_container_width=True)
 
-    # Plot combined historical + forecast
     pair_for_chart = st.selectbox("Select pair for forecast chart", ForexEngine.PAIRS, key="forex_fcast_chart")
     if pair_for_chart in chart_data:
         st.line_chart(chart_data[pair_for_chart])
@@ -796,8 +992,6 @@ if mode == "💱 Forex Pro":
     if st.button("🔄 Refresh Live Data", key="forex_refresh"):
         st.session_state.forex_data = ForexEngine.get_live_data(use_real=st.session_state.use_real_forex)
         st.session_state.forex_volume = ForexEngine.get_volume()
-        # regenerate historical daily with new last price anchor?
-        # For simplicity, keep same synthetic history.
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -823,7 +1017,6 @@ elif mode == "₿ Crypto Tracker":
         if hist is not None:
             st.line_chart(hist["price"])
 
-        # ---------- CRYPTO FORECAST SECTION ----------
         st.subheader("🔮 Crypto Forecasts (Daily, Weekly, Monthly)")
         crypto_horizon = st.radio("Forecast period", ["1 Day", "7 Days (Week)", "30 Days (Month)"], key="crypto_horizon", horizontal=True)
         horizon_map_c = {"1 Day": 1, "7 Days (Week)": 7, "30 Days (Month)": 30}
@@ -856,12 +1049,11 @@ elif mode == "₿ Crypto Tracker":
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ====================== STRUCTURAL PRO ======================
-else:
+elif mode == "🏗️ Structural Pro":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.subheader("🏗️ Structural Pro: Analysis & Design")
     tab1, tab2, tab3 = st.tabs(["3D Building Designer", "Beam Load Distribution", "Truss FEM"])
 
-    # ---------- 3D Designer ----------
     with tab1:
         with st.expander("➕ Add New Element", expanded=True):
             elem_type = st.selectbox("Element Type", list(StructuralModel.ELEMENT_TYPES.keys()), key="3d_type")
@@ -954,7 +1146,6 @@ else:
         else:
             st.info("No building elements yet.")
 
-    # ---------- Beam Load Distribution ----------
     with tab2:
         st.subheader("📐 Beam Load Distribution")
         beam_len = st.number_input("Beam Length (m)", 1.0, 20.0, 5.0)
@@ -971,7 +1162,6 @@ else:
                 send_email_notification(email, "Beam Analysis Results", str(reactions))
                 st.toast(f"📧 Results sent to {email}")
 
-    # ---------- Truss FEM ----------
     with tab3:
         st.subheader("🧮 Simple 2D Truss FEM")
         st.markdown("Define nodes (x,y), elements (node i, node j, E, A), forces, and constraints.")
@@ -1011,6 +1201,38 @@ else:
             except Exception as e:
                 st.error(f"Error: {e}")
 
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ====================== MOBILE WALLET ======================
+elif mode == "💳 Mobile Wallet":
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    st.subheader("💳 Mobile Money Wallet (East Africa)")
+    balance = MobileWallet.get_balance(st.session_state.username)
+    st.metric("Your Balance (USD)", f"${balance:,.2f}")
+
+    with st.expander("➕ Deposit via Mobile Money", expanded=False):
+        with st.form("deposit_form"):
+            phone = st.text_input("Phone Number (e.g., 2567XXXXXXXX)")
+            amount = st.number_input("Amount (USD)", min_value=1.0, step=1.0)
+            provider = st.selectbox("Provider", MobileWallet.PROVIDERS)
+            if st.form_submit_button("Request STK Push"):
+                if phone and amount > 0:
+                    ref = MobileWallet.deposit_request(st.session_state.username, phone, amount, provider)
+                    st.success(f"STK Push sent to {phone}. Reference: {ref}")
+                    st.info("Simulate: Enter PIN to confirm...")
+                    if st.button("Confirm Payment (Simulate)"):
+                        MobileWallet.confirm_deposit(ref)
+                        st.success("Deposit confirmed! Balance updated.")
+                        st.rerun()
+                else:
+                    st.error("Please fill phone and amount.")
+
+    st.subheader("📋 Transaction History")
+    trans = MobileWallet.get_transactions(st.session_state.username)
+    if not trans.empty:
+        st.dataframe(trans[['timestamp','type','amount','phone','provider','status']], use_container_width=True)
+    else:
+        st.write("No transactions yet.")
     st.markdown('</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
