@@ -8,7 +8,6 @@ import hashlib
 import json
 import smtplib
 from email.message import EmailMessage
-from st_javascript import st_javascript
 
 # ------------------------------------------------------------------
 # DATABASE SETUP (MUST RUN FIRST)
