@@ -4,7 +4,6 @@ import numpy as np
 import requests
 import sqlite3
 from datetime import datetime, timedelta
-import json
 import hashlib
 
 # ------------------------------------------------------------------
@@ -35,23 +34,43 @@ def get_db_connection():
     return sqlite3.connect("arc_os.db")
 
 # ------------------------------------------------------------------
-# AUTHENTICATION (TEMPORARILY BYPASSED)
+# AUTHENTICATION (FIX 2 – WORKING LOGIN)
 # ------------------------------------------------------------------
-# Force logged in – no login screen appears.
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = True
-    st.session_state.username = "demo"
+USERS = {
+    "admin": hashlib.sha256("arc2024".encode()).hexdigest(),
+    "demo": hashlib.sha256("demo".encode()).hexdigest()
+}
 
-# If you want to re-enable authentication later, replace the lines above with the following block:
-# USERS = {
-#     "admin": hashlib.sha256("arc2024".encode()).hexdigest(),
-#     "demo": hashlib.sha256("demo".encode()).hexdigest()
-# }
-# if "authenticated" not in st.session_state:
-#     st.session_state.authenticated = False
-# if not st.session_state.authenticated:
-#     login()
-#     st.stop()
+def login():
+    st.markdown("<h1 style='text-align: center;'>🔐 Arc OS Pro Login</h1>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Login")
+            if submitted:
+                if username in USERS:
+                    hashed = hashlib.sha256(password.encode()).hexdigest()
+                    if hashed == USERS[username]:
+                        st.session_state.authenticated = True
+                        st.session_state.username = username
+                        st.rerun()
+                    else:
+                        st.error("Invalid password")
+                else:
+                    st.error("Invalid username")
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+if not st.session_state.authenticated:
+    login()
+    st.stop()
+
+def logout():
+    st.session_state.authenticated = False
+    st.session_state.pop("username", None)
+    st.rerun()
 
 # ------------------------------------------------------------------
 # FOREX ENGINE (Real + DB storage)
@@ -211,7 +230,7 @@ class SaiArchitect:
             delta = (P * beam_length**3) / (48 * E * I)
 
         sigma = M / W
-        tau = 1.5 * V / 0.01  # simplified shear area
+        tau = 1.5 * V / 0.01
         sigma_rd = fy / gamma
         tau_rd = fy / (np.sqrt(3) * gamma)
         util_m = sigma / sigma_rd
@@ -229,7 +248,6 @@ class SaiArchitect:
             "Deflection OK": "✅" if delta <= limit_def else "❌",
             "Status": "OK ✅" if ok else "FAIL ❌"
         }
-        # Store in DB
         conn = get_db_connection()
         c = conn.cursor()
         c.execute('''INSERT INTO structural_analyses 
@@ -250,7 +268,7 @@ class SaiArchitect:
         return df
 
 # ------------------------------------------------------------------
-# 3D VIEWER (Three.js HTML component)
+# 3D VIEWER (Three.js)
 # ------------------------------------------------------------------
 def render_3d_viewer(beam_length, load_magnitude, load_type, material):
     html_code = f"""
@@ -271,21 +289,18 @@ def render_3d_viewer(beam_length, load_magnitude, load_type, material):
         renderer.setSize(window.innerWidth, window.innerHeight);
         document.body.appendChild(renderer.domElement);
 
-        // Lights
         const ambientLight = new THREE.AmbientLight(0x404080);
         scene.add(ambientLight);
         const dirLight = new THREE.DirectionalLight(0xffffff, 1);
         dirLight.position.set(1, 2, 1);
         scene.add(dirLight);
 
-        // Beam (box geometry)
         const beamGeometry = new THREE.BoxGeometry({beam_length}, 0.2, 0.3);
         const beamMat = new THREE.MeshPhongMaterial({{ color: 0x3a7bd5, emissive: 0x001122 }});
         const beam = new THREE.Mesh(beamGeometry, beamMat);
         beam.position.y = 2;
         scene.add(beam);
 
-        // Supports
         const supportMat = new THREE.MeshPhongMaterial({{ color: 0x00d2ff, emissive: 0x002222 }});
         const leftSupport = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 1.5, 8), supportMat);
         leftSupport.position.set(-{beam_length/2 + 0.2}, 1.25, 0);
@@ -294,15 +309,11 @@ def render_3d_viewer(beam_length, load_magnitude, load_type, material):
         rightSupport.position.x = {beam_length/2 + 0.2};
         scene.add(rightSupport);
 
-        // Load arrow (pointing down from midspan)
         const arrowDir = new THREE.Vector3(0, -1, 0);
         const arrowOrigin = new THREE.Vector3(0, 2.2, 0);
-        const arrowLength = 1.2;
-        const arrowColor = 0xff4b2b;
-        const arrow = new THREE.ArrowHelper(arrowDir, arrowOrigin, arrowLength, arrowColor, 0.3, 0.2);
+        const arrow = new THREE.ArrowHelper(arrowDir, arrowOrigin, 1.2, 0xff4b2b, 0.3, 0.2);
         scene.add(arrow);
 
-        // Load label (sprite)
         const canvas = document.createElement('canvas');
         canvas.width = 128; canvas.height = 64;
         const ctx = canvas.getContext('2d');
@@ -317,11 +328,9 @@ def render_3d_viewer(beam_length, load_magnitude, load_type, material):
         sprite.scale.set(1.5, 0.75, 1);
         scene.add(sprite);
 
-        // Grid
         const gridHelper = new THREE.GridHelper(10, 20, 0x336699, 0x224466);
         scene.add(gridHelper);
 
-        // OrbitControls (simple)
         let isDragging = false, previousMouse = {{ x: 0, y: 0 }};
         renderer.domElement.addEventListener('mousedown', e => {{ isDragging = true; previousMouse.x = e.clientX; previousMouse.y = e.clientY; }});
         renderer.domElement.addEventListener('mouseup', () => isDragging = false);
@@ -398,9 +407,8 @@ def load_css():
     """, unsafe_allow_html=True)
 
 load_css()
-init_db()  # Ensure DB tables exist
+init_db()
 
-# Session state defaults
 if 'forex_data' not in st.session_state:
     st.session_state.forex_data = ForexEngine.get_live_data(use_real=True)
 if 'forex_volume' not in st.session_state:
@@ -410,14 +418,14 @@ if 'arch_result' not in st.session_state:
 if 'use_real_forex' not in st.session_state:
     st.session_state.use_real_forex = True
 
-# Sidebar
 with st.sidebar:
     st.markdown("## ⚙️ Arc OS Pro")
     st.write(f"👤 {st.session_state.username}")
     mode = st.radio("🧠 Engine", ["💱 Forex Pro", "🏗️ Arch Pro"])
     st.checkbox("Real‑time forex", value=st.session_state.use_real_forex, key="use_real_forex")
-    # Logout button removed (authentication bypassed)
-    st.caption("v4.1 · Auth bypassed (demo mode)")
+    if st.button("🚪 Logout"):
+        logout()
+    st.caption("v4.2 · Fixed Auth")
 
 st.markdown("<h1 style='text-align: center;'>🌌 Arc | AI Operating System Pro</h1>", unsafe_allow_html=True)
 
@@ -425,7 +433,6 @@ st.markdown("<h1 style='text-align: center;'>🌌 Arc | AI Operating System Pro<
 if "Forex" in mode:
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.subheader("💹 Forex Pro: Live & Historical")
-
     forex_df = ForexEngine.get_live_data(use_real=st.session_state.use_real_forex)
     st.session_state.forex_data = forex_df
 
@@ -443,7 +450,6 @@ if "Forex" in mode:
     st.subheader("📈 Live Streams")
     st.line_chart(forex_df.set_index("Time"))
 
-    # Historical DB data for a selected pair
     pair_hist = st.selectbox("🔍 Historical from DB", ForexEngine.PAIRS)
     hist_df = ForexEngine.get_history(pair_hist, 30)
     if not hist_df.empty:
@@ -453,10 +459,8 @@ if "Forex" in mode:
 
     st.subheader("📊 Volume")
     st.bar_chart(st.session_state.forex_volume.set_index("Time"))
-
     st.subheader("🔗 Correlation")
     st.table(ForexEngine.get_correlation_matrix(forex_df))
-
     st.subheader("📅 Economic Calendar")
     st.table(ForexEngine.generate_economic_calendar())
 
@@ -470,7 +474,6 @@ if "Forex" in mode:
 else:
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.subheader("🏛️ Arch Pro: 3D Interactive Analysis")
-
     col_input, col_viz = st.columns([1, 2])
 
     with col_input:
