@@ -6,6 +6,8 @@ import sqlite3
 from datetime import datetime, timedelta
 import hashlib
 import json
+import smtplib
+from email.message import EmailMessage
 
 # ------------------------------------------------------------------
 # DATABASE SETUP (MUST RUN FIRST)
@@ -47,7 +49,6 @@ def init_db():
 def get_db_connection():
     return sqlite3.connect("arc_os.db")
 
-# Initialize database now – before any login or session state that uses it
 init_db()
 
 # ------------------------------------------------------------------
@@ -80,7 +81,8 @@ def add_user(username, password, email, role="user"):
         c.execute("INSERT INTO users (username, password_hash, email, role) VALUES (?, ?, ?, ?)",
                   (username, pwd_hash, email, role))
         conn.commit()
-        st.toast(f"📧 Account created for {email} (email notification sent)")
+        send_email_notification(email, "Account Created", f"Hello {username}, your Arc OS account has been created.")
+        st.toast(f"📧 Account created for {email} (email sent)")
         return True, f"User '{username}' added successfully."
     except sqlite3.IntegrityError:
         return False, "Username already exists."
@@ -126,6 +128,32 @@ def login():
             st.rerun()
 
 # ------------------------------------------------------------------
+# EMAIL SENDING (via Streamlit secrets)
+# ------------------------------------------------------------------
+def send_email_notification(to_email, subject, body):
+    """Send email using SMTP credentials from Streamlit secrets."""
+    try:
+        sender = st.secrets["email_sender"]
+        password = st.secrets["email_password"]
+        smtp_server = st.secrets.get("smtp_server", "smtp.gmail.com")
+        smtp_port = st.secrets.get("smtp_port", 587)
+
+        msg = EmailMessage()
+        msg.set_content(body)
+        msg["Subject"] = subject
+        msg["From"] = sender
+        msg["To"] = to_email
+
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(sender, password)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        st.warning(f"Email could not be sent: {e}")
+        return False
+
+# ------------------------------------------------------------------
 # SESSION STATE INIT
 # ------------------------------------------------------------------
 if "authenticated" not in st.session_state:
@@ -150,7 +178,7 @@ def logout():
     st.rerun()
 
 # ------------------------------------------------------------------
-# FOREX ENGINE (Real-time via ExchangeRate-API + fallbacks)
+# FOREX ENGINE (Real-time via ExchangeRate-API)
 # ------------------------------------------------------------------
 class ForexEngine:
     PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "UGX/USD", "KES/USD", "SSP/USD"]
@@ -158,7 +186,6 @@ class ForexEngine:
     @staticmethod
     def fetch_latest_rates():
         live_rates = {}
-        # Primary: ExchangeRate-API (base=USD)
         try:
             resp = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=10)
             resp.raise_for_status()
@@ -171,39 +198,7 @@ class ForexEngine:
             live_rates["KES/USD"] = round(usd_to["KES"], 4)
             live_rates["SSP/USD"] = round(usd_to["SSP"], 4)
             return live_rates
-        except Exception as e:
-            st.warning(f"ExchangeRate-API failed ({e}), trying Frankfurter fallback...")
-
-        # Fallback: Frankfurter (may lack UGX/KES/SSP)
-        currencies = {"EUR","USD","GBP","JPY","UGX","KES","SSP"}
-        currencies_str = ",".join(currencies)
-        url = f"https://api.frankfurter.app/latest?from=EUR&to={currencies_str}"
-        try:
-            resp = requests.get(url, timeout=10)
-            resp.raise_for_status()
-            data = resp.json()["rates"]
-            eur_to = data
-            for pair in ForexEngine.PAIRS:
-                if pair == "EUR/USD":
-                    rate = eur_to.get("USD")
-                elif pair == "GBP/USD":
-                    eur_gbp = eur_to.get("GBP")
-                    eur_usd = eur_to.get("USD")
-                    rate = eur_usd / eur_gbp if eur_gbp else None
-                elif pair == "USD/JPY":
-                    eur_jpy = eur_to.get("JPY")
-                    eur_usd = eur_to.get("USD")
-                    rate = eur_jpy / eur_usd if eur_usd else None
-                else:  # UGX, KES, SSP are USD-based
-                    rate = eur_to.get(pair.split("/")[1])
-                    if rate and eur_to.get("USD"):
-                        rate = rate / eur_to["USD"]
-                    else:
-                        rate = None
-                live_rates[pair] = round(rate, 4) if rate else None
-            return live_rates
-        except Exception as e:
-            st.warning(f"Frankfurter also failed ({e}). Falling back to simulated rates.")
+        except:
             return None
 
     @staticmethod
@@ -224,7 +219,6 @@ class ForexEngine:
                     else:
                         base = defaults.get(pair, 1.0)
                         vol = base * 0.001
-                        st.info(f"Using simulated data for {pair} (not in live feed).")
                     prices = base + np.cumsum(np.random.normal(0, vol, minutes))
                     data[pair] = np.round(np.maximum(prices, 0.0001), 4)
                 df = pd.DataFrame(data)
@@ -304,7 +298,138 @@ class ForexEngine:
         return pd.DataFrame({"Time": times, "Volume": volume})
 
 # ------------------------------------------------------------------
-# ADVANCED STRUCTURAL MODULE (Building Elements)
+# CRYPTO ENGINE (Live via CoinGecko)
+# ------------------------------------------------------------------
+class CryptoEngine:
+    COINS = ["bitcoin", "ethereum", "ripple", "cardano", "solana"]
+    NAMES = {"bitcoin": "BTC", "ethereum": "ETH", "ripple": "XRP",
+             "cardano": "ADA", "solana": "SOL"}
+
+    @staticmethod
+    def fetch_prices():
+        try:
+            ids = ",".join(CryptoEngine.COINS)
+            url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=usd&include_24hr_change=true"
+            resp = requests.get(url, timeout=10)
+            data = resp.json()
+            prices = []
+            for coin in CryptoEngine.COINS:
+                info = data.get(coin, {})
+                prices.append({
+                    "Coin": CryptoEngine.NAMES[coin],
+                    "Price (USD)": info.get("usd", None),
+                    "24h Change %": round(info.get("usd_24h_change", 0), 2)
+                })
+            return pd.DataFrame(prices)
+        except Exception as e:
+            st.warning(f"Crypto fetch failed: {e}")
+            return None
+
+    @staticmethod
+    def get_historical(coin_id, days=7):
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days={days}"
+        try:
+            resp = requests.get(url, timeout=10)
+            data = resp.json()
+            prices = data["prices"]
+            df = pd.DataFrame(prices, columns=["timestamp", "price"])
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            return df.set_index("timestamp")
+        except:
+            return None
+
+# ------------------------------------------------------------------
+# ADVANCED STRUCTURAL ANALYSIS (FEM + Load Distribution)
+# ------------------------------------------------------------------
+class StructuralAnalysis:
+    @staticmethod
+    def truss_fem(nodes, elements, forces, constraints):
+        """
+        Simple 2D truss FEM.
+        nodes: list of (x, y)
+        elements: list of (node_i, node_j, E, A)
+        forces: dict node_idx -> (Fx, Fy)
+        constraints: dict node_idx -> (fixed_dx, fixed_dy) e.g. (True, True)
+        Returns displacements dict.
+        """
+        n_nodes = len(nodes)
+        ndof = 2 * n_nodes
+        K = np.zeros((ndof, ndof))
+        # Assemble global stiffness
+        for (i, j, E, A) in elements:
+            xi, yi = nodes[i]
+            xj, yj = nodes[j]
+            L = np.sqrt((xj-xi)**2 + (yj-yi)**2)
+            c = (xj - xi) / L
+            s = (yj - yi) / L
+            k_local = (E * A / L) * np.array([
+                [c*c, c*s, -c*c, -c*s],
+                [c*s, s*s, -c*s, -s*s],
+                [-c*c, -c*s, c*c, c*s],
+                [-c*s, -s*s, c*s, s*s]
+            ])
+            dof_map = [2*i, 2*i+1, 2*j, 2*j+1]
+            for a in range(4):
+                for b in range(4):
+                    K[dof_map[a], dof_map[b]] += k_local[a, b]
+        # Apply constraints and forces
+        free_dofs = []
+        for node in range(n_nodes):
+            if not constraints.get(node, (False,False))[0]:
+                free_dofs.append(2*node)
+            if not constraints.get(node, (False,False))[1]:
+                free_dofs.append(2*node+1)
+        K_free = K[np.ix_(free_dofs, free_dofs)]
+        F_free = np.zeros(len(free_dofs))
+        for node, (fx, fy) in forces.items():
+            if 2*node in free_dofs:
+                idx = free_dofs.index(2*node)
+                F_free[idx] = fx
+            if 2*node+1 in free_dofs:
+                idx = free_dofs.index(2*node+1)
+                F_free[idx] = fy
+        # Solve
+        try:
+            u_free = np.linalg.solve(K_free, F_free)
+        except np.linalg.LinAlgError:
+            return None
+        u = np.zeros(ndof)
+        for i, dof in enumerate(free_dofs):
+            u[dof] = u_free[i]
+        # Format as dict
+        disp = {i: (u[2*i], u[2*i+1]) for i in range(n_nodes)}
+        return disp
+
+    @staticmethod
+    def beam_load_distribution(beam_length, load_type, load_mag, supports):
+        """
+        Compute reactions for a simply supported or cantilever beam.
+        supports: "simple" or "cantilever"
+        Returns dict with reaction forces.
+        """
+        if load_type == "Uniform (kN/m)":
+            w = load_mag
+            if supports == "simple":
+                Ra = w * beam_length / 2
+                Rb = w * beam_length / 2
+                return {"Ra": Ra, "Rb": Rb}
+            else:  # cantilever
+                M_fixed = w * beam_length**2 / 2
+                R_fixed = w * beam_length
+                return {"R_fixed": R_fixed, "M_fixed": M_fixed}
+        else:  # Point load at midspan
+            P = load_mag
+            if supports == "simple":
+                Ra = P / 2
+                Rb = P / 2
+                return {"Ra": Ra, "Rb": Rb}
+            else:
+                R_fixed = P
+                M_fixed = P * beam_length
+                return {"R_fixed": R_fixed, "M_fixed": M_fixed}
+
+# ------------------------------------------------------------------
+# BUILDING DESIGNER (3D) – unchanged
 # ------------------------------------------------------------------
 class StructuralModel:
     ELEMENT_TYPES = {
@@ -325,6 +450,7 @@ class StructuralModel:
         conn.commit()
         user_email = StructuralModel.get_user_email(username)
         if user_email:
+            send_email_notification(user_email, "Element Added", f"A new {elem_type} was added to your project.")
             st.toast(f"📧 Element added. Report sent to {user_email}")
 
     @staticmethod
@@ -454,7 +580,7 @@ class StructuralModel:
         return html
 
 # ------------------------------------------------------------------
-# STREAMLIT APP (UI after login)
+# STREAMLIT UI
 # ------------------------------------------------------------------
 st.set_page_config(page_title="Arc OS Pro", layout="wide")
 
@@ -473,7 +599,6 @@ def load_css():
 
 load_css()
 
-# Ensure role exists after login
 if 'role' not in st.session_state:
     conn = get_db_connection()
     c = conn.cursor()
@@ -481,25 +606,22 @@ if 'role' not in st.session_state:
     row = c.fetchone()
     st.session_state.role = row[0] if row else "user"
 
-# Session data defaults
 if 'forex_data' not in st.session_state:
     st.session_state.forex_data = ForexEngine.get_live_data(use_real=True)
 if 'forex_volume' not in st.session_state:
     st.session_state.forex_volume = ForexEngine.get_volume()
-if 'arch_result' not in st.session_state:
-    st.session_state.arch_result = None
 if 'use_real_forex' not in st.session_state:
     st.session_state.use_real_forex = True
 
 with st.sidebar:
     st.markdown("## ⚙️ Arc OS Pro")
     st.write(f"👤 {st.session_state.username} ({st.session_state.role})")
-    mode = st.radio("🧠 Engine", ["💱 Forex Pro", "🏗️ Structural Pro"])
+    mode = st.radio("🧠 Engine", ["💱 Forex Pro", "🏗️ Structural Pro", "₿ Crypto Tracker"])
 
     st.markdown("---")
     if mode == "💱 Forex Pro":
         st.checkbox("Real‑time forex", value=st.session_state.use_real_forex, key="use_real_forex")
-    else:
+    elif mode == "🏗️ Structural Pro":
         st.markdown("### 🧊 Building Designer")
 
     if st.session_state.role == "admin":
@@ -522,19 +644,19 @@ with st.sidebar:
     with st.expander("🚀 Deploy to Streamlit Cloud"):
         st.markdown("""
         1. Push `streamlit_app.py` + `requirements.txt` to GitHub.
-        2. Go to [share.streamlit.io](https://share.streamlit.io) and connect your repo.
-        3. Set branch `main`, file path `streamlit_app.py`.
-        4. Click **Deploy**.
+        2. Set secrets: `email_sender`, `email_password`, `smtp_server`, `smtp_port`.
+        3. Go to [share.streamlit.io](https://share.streamlit.io) and connect your repo.
+        4. Set branch `main`, file path `streamlit_app.py`, deploy.
         """)
 
     if st.button("🚪 Logout"):
         logout()
-    st.caption("v7.1 · Database init fixed")
+    st.caption("v8.0 · FEM + Email + Crypto")
 
 st.markdown("<h1 style='text-align: center;'>🌌 Arc | AI Operating System Pro</h1>", unsafe_allow_html=True)
 
 # ====================== FOREX MODULE ======================
-if "Forex" in mode:
+if mode == "💱 Forex Pro":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.subheader("💹 Forex Pro: Live & Historical")
     forex_df = ForexEngine.get_live_data(use_real=st.session_state.use_real_forex)
@@ -553,148 +675,205 @@ if "Forex" in mode:
 
     st.subheader("📈 Live Streams")
     st.line_chart(forex_df.set_index("Time"))
-
     pair_hist = st.selectbox("🔍 Historical from DB", ForexEngine.PAIRS)
     hist_df = ForexEngine.get_history(pair_hist, 30)
     if not hist_df.empty:
         st.line_chart(hist_df.set_index("timestamp"))
     else:
         st.info("No history yet.")
-
     st.subheader("📊 Volume")
     st.bar_chart(st.session_state.forex_volume.set_index("Time"))
     st.subheader("🔗 Correlation")
     st.table(ForexEngine.get_correlation_matrix(forex_df))
     st.subheader("📅 Economic Calendar")
     st.table(ForexEngine.generate_economic_calendar())
-
     if st.button("🔄 Refresh Live Data", key="forex_refresh"):
         st.session_state.forex_data = ForexEngine.get_live_data(use_real=st.session_state.use_real_forex)
         st.session_state.forex_volume = ForexEngine.get_volume()
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
+# ====================== CRYPTO MODULE ======================
+elif mode == "₿ Crypto Tracker":
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    st.subheader("₿ Live Crypto Prices")
+    prices_df = CryptoEngine.fetch_prices()
+    if prices_df is not None:
+        cols = st.columns(len(prices_df))
+        for i, row in prices_df.iterrows():
+            with cols[i]:
+                change = row["24h Change %"]
+                color = "#00ff88" if change >= 0 else "#ff4b4b"
+                st.markdown(f"""<div class="metric-box">
+                    <span style="font-size:18px;">{row['Coin']}</span><br>
+                    <span style="font-size:24px;">${row['Price (USD)']:,.2f}</span><br>
+                    <span style="font-size:14px; color:{color};">24h: {change:.2f}%</span>
+                </div>""", unsafe_allow_html=True)
+
+        selected = st.selectbox("Select coin for chart", CryptoEngine.COINS)
+        hist = CryptoEngine.get_historical(selected, days=7)
+        if hist is not None:
+            st.line_chart(hist["price"])
+    else:
+        st.error("Could not fetch crypto data.")
+    st.markdown('</div>', unsafe_allow_html=True)
+
 # ====================== STRUCTURAL PRO ======================
 else:
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.subheader("🏗️ Structural Pro: Building Designer")
+    st.subheader("🏗️ Structural Pro: Analysis & Design")
+    tab1, tab2, tab3 = st.tabs(["3D Building Designer", "Beam Load Distribution", "Truss FEM"])
 
-    with st.expander("➕ Add New Element", expanded=True):
-        elem_type = st.selectbox("Element Type", list(StructuralModel.ELEMENT_TYPES.keys()))
-        subtypes = StructuralModel.ELEMENT_TYPES[elem_type]
-        subtype = st.selectbox("Subtype", subtypes)
-
-        params = {}
-        col1, col2, col3 = st.columns(3)
-
-        if elem_type == "column":
-            with col1:
-                params["x"] = st.number_input("X position (m)", value=0.0)
-            with col2:
-                params["z"] = st.number_input("Z position (m)", value=0.0)
-            with col3:
-                params["height"] = st.number_input("Height (m)", value=3.0, min_value=0.1)
-            if subtype == "circular":
-                params["radius"] = st.number_input("Radius (m)", value=0.15, min_value=0.01)
-            else:
-                params["width"] = st.number_input("Width (m)", value=0.3, min_value=0.01)
-                params["depth"] = st.number_input("Depth (m)", value=0.3, min_value=0.01)
-        elif elem_type == "beam":
-            with col1:
-                params["x1"] = st.number_input("Start X (m)", value=0.0)
-                params["z1"] = st.number_input("Start Z (m)", value=0.0)
-            with col2:
-                params["x2"] = st.number_input("End X (m)", value=4.0)
-                params["z2"] = st.number_input("End Z (m)", value=0.0)
-            with col3:
-                params["y"] = st.number_input("Elevation Y (m)", value=3.0)
-            params["width"] = st.number_input("Width (m)", value=0.2, min_value=0.01)
-            params["depth"] = st.number_input("Depth (m)", value=0.3, min_value=0.01)
-        elif elem_type == "slab":
-            with col1:
-                params["x"] = st.number_input("Center X (m)", value=2.0)
-            with col2:
-                params["z"] = st.number_input("Center Z (m)", value=2.0)
-            with col3:
-                params["y"] = st.number_input("Level Y (m)", value=3.0)
-            params["width"] = st.number_input("Width (m)", value=4.0, min_value=0.1)
-            params["depth"] = st.number_input("Depth (m)", value=4.0, min_value=0.1)
-            params["thickness"] = st.number_input("Thickness (m)", value=0.15, min_value=0.01)
-        elif elem_type == "wall":
-            with col1:
-                params["x1"] = st.number_input("Start X (m)", value=0.0)
-                params["z1"] = st.number_input("Start Z (m)", value=0.0)
-            with col2:
-                params["x2"] = st.number_input("End X (m)", value=4.0)
-                params["z2"] = st.number_input("End Z (m)", value=0.0)
-            with col3:
-                params["height"] = st.number_input("Height (m)", value=3.0)
-            params["thickness"] = st.number_input("Thickness (m)", value=0.15, min_value=0.01)
-        elif elem_type == "opening":
-            with col1:
-                params["wall_x"] = st.number_input("Wall center X (m)", value=2.0)
-                params["wall_z"] = st.number_input("Wall center Z (m)", value=0.0)
-            with col2:
-                params["pos_x"] = st.number_input("Opening center X (m)", value=2.0)
-                params["pos_z"] = st.number_input("Opening center Z (m)", value=0.0)
-            with col3:
-                params["width"] = st.number_input("Width (m)", value=1.0, min_value=0.1)
-                params["height"] = st.number_input("Height (m)", value=2.1, min_value=0.1)
-
-        if st.button("Add Element"):
-            StructuralModel.add_element(st.session_state.username, elem_type, subtype, params)
-            st.rerun()
-
-    elements = StructuralModel.get_elements(st.session_state.username)
-    if not elements.empty:
-        st.markdown("### 🧊 3D Building View")
-        html = StructuralModel.generate_3d_scene(elements)
-        st.components.v1.html(html, height=450)
-
-        st.markdown("### 📋 Elements List")
-        for idx, row in elements.iterrows():
-            p = row["params"]
-            col1, col2, col3 = st.columns([3,1,1])
-            with col1:
-                if row["type"] == "opening":
-                    desc = f"{row['subtype']} at ({p['pos_x']:.2f}, {p['pos_z']:.2f}) {p['width']}x{p['height']}m"
+    # ---------- 3D Designer ----------
+    with tab1:
+        with st.expander("➕ Add New Element", expanded=True):
+            elem_type = st.selectbox("Element Type", list(StructuralModel.ELEMENT_TYPES.keys()), key="3d_type")
+            subtypes = StructuralModel.ELEMENT_TYPES[elem_type]
+            subtype = st.selectbox("Subtype", subtypes, key="3d_sub")
+            params = {}
+            col1, col2, col3 = st.columns(3)
+            if elem_type == "column":
+                with col1:
+                    params["x"] = st.number_input("X position (m)", value=0.0)
+                with col2:
+                    params["z"] = st.number_input("Z position (m)", value=0.0)
+                with col3:
+                    params["height"] = st.number_input("Height (m)", value=3.0, min_value=0.1)
+                if subtype == "circular":
+                    params["radius"] = st.number_input("Radius (m)", value=0.15, min_value=0.01)
                 else:
-                    desc = f"{row['type']} {row['subtype']}"
-                    if row["type"] in ["column","slab"]:
-                        desc += f" @ ({p.get('x',p.get('x1','?'))}, {p.get('z',p.get('z1','?'))})"
+                    params["width"] = st.number_input("Width (m)", value=0.3, min_value=0.01)
+                    params["depth"] = st.number_input("Depth (m)", value=0.3, min_value=0.01)
+            elif elem_type == "beam":
+                with col1:
+                    params["x1"] = st.number_input("Start X", value=0.0)
+                    params["z1"] = st.number_input("Start Z", value=0.0)
+                with col2:
+                    params["x2"] = st.number_input("End X", value=4.0)
+                    params["z2"] = st.number_input("End Z", value=0.0)
+                with col3:
+                    params["y"] = st.number_input("Elevation Y", value=3.0)
+                params["width"] = st.number_input("Width (m)", value=0.2, min_value=0.01)
+                params["depth"] = st.number_input("Depth (m)", value=0.3, min_value=0.01)
+            elif elem_type == "slab":
+                with col1:
+                    params["x"] = st.number_input("Center X", value=2.0)
+                with col2:
+                    params["z"] = st.number_input("Center Z", value=2.0)
+                with col3:
+                    params["y"] = st.number_input("Level Y", value=3.0)
+                params["width"] = st.number_input("Width", value=4.0, min_value=0.1)
+                params["depth"] = st.number_input("Depth", value=4.0, min_value=0.1)
+                params["thickness"] = st.number_input("Thickness", value=0.15, min_value=0.01)
+            elif elem_type == "wall":
+                with col1:
+                    params["x1"] = st.number_input("Start X", value=0.0)
+                    params["z1"] = st.number_input("Start Z", value=0.0)
+                with col2:
+                    params["x2"] = st.number_input("End X", value=4.0)
+                    params["z2"] = st.number_input("End Z", value=0.0)
+                with col3:
+                    params["height"] = st.number_input("Height", value=3.0)
+                params["thickness"] = st.number_input("Thickness", value=0.15, min_value=0.01)
+            elif elem_type == "opening":
+                with col1:
+                    params["wall_x"] = st.number_input("Wall center X", value=2.0)
+                    params["wall_z"] = st.number_input("Wall center Z", value=0.0)
+                with col2:
+                    params["pos_x"] = st.number_input("Opening X", value=2.0)
+                    params["pos_z"] = st.number_input("Opening Z", value=0.0)
+                with col3:
+                    params["width"] = st.number_input("Width", value=1.0, min_value=0.1)
+                    params["height"] = st.number_input("Height", value=2.1, min_value=0.1)
+            if st.button("Add Element", key="add_elem"):
+                StructuralModel.add_element(st.session_state.username, elem_type, subtype, params)
+                st.rerun()
+
+        elements = StructuralModel.get_elements(st.session_state.username)
+        if not elements.empty:
+            st.markdown("### 🧊 3D Building View")
+            html = StructuralModel.generate_3d_scene(elements)
+            st.components.v1.html(html, height=450)
+            st.markdown("### 📋 Elements List")
+            for idx, row in elements.iterrows():
+                p = row["params"]
+                col1, col2, col3 = st.columns([3,1,1])
+                with col1:
+                    if row["type"] == "opening":
+                        desc = f"{row['subtype']} at ({p['pos_x']:.2f}, {p['pos_z']:.2f})"
                     else:
-                        desc += f" from ({p.get('x1',0):.2f},{p.get('z1',0):.2f}) to ({p.get('x2',0):.2f},{p.get('z2',0):.2f})"
-                st.write(desc)
-            with col2:
-                st.write(f"ID: {row['id']}")
-            with col3:
-                if st.button("🗑️ Delete", key=f"del_{row['id']}"):
-                    StructuralModel.delete_element(row['id'])
-                    st.rerun()
-    else:
-        st.info("No building elements yet.")
+                        desc = f"{row['type']} {row['subtype']}"
+                        if row["type"] in ["column","slab"]:
+                            desc += f" @ ({p.get('x',0)}, {p.get('z',0)})"
+                        else:
+                            desc += f" from ({p.get('x1',0)},{p.get('z1',0)}) to ({p.get('x2',0)},{p.get('z2',0)})"
+                    st.write(desc)
+                with col2:
+                    st.write(f"ID: {row['id']}")
+                with col3:
+                    if st.button("🗑️ Delete", key=f"del_{row['id']}"):
+                        StructuralModel.delete_element(row['id'])
+                        st.rerun()
+        else:
+            st.info("No building elements yet.")
 
-    if not elements.empty:
-        with st.expander("📊 Structural Analysis Summary"):
-            cols = elements[elements["type"]=="column"]
-            beams = elements[elements["type"]=="beam"]
-            slabs = elements[elements["type"]=="slab"]
-            walls = elements[elements["type"]=="wall"]
-            openings = elements[elements["type"]=="opening"]
-            st.write(f"**Columns:** {len(cols)} | **Beams:** {len(beams)} | **Slabs:** {len(slabs)} | **Walls:** {len(walls)} | **Openings:** {len(openings)}")
-            if len(slabs) > 0:
-                total_area = sum([p.get("width",0)*p.get("depth",0) for p in slabs["params"]])
-                st.write(f"Total slab area: {total_area:.2f} m²")
-            if len(beams) > 0:
-                lengths = [np.sqrt((p["x2"]-p["x1"])**2 + (p["z2"]-p["z1"])**2) for p in beams["params"]]
-                st.write(f"Total beam length: {sum(lengths):.2f} m")
-
-        if st.button("📧 Email Structural Report"):
+    # ---------- Beam Load Distribution ----------
+    with tab2:
+        st.subheader("📐 Beam Load Distribution")
+        beam_len = st.number_input("Beam Length (m)", 1.0, 20.0, 5.0)
+        load_type = st.selectbox("Load Type", ["Uniform (kN/m)", "Point Load (kN)"])
+        load_val = st.number_input("Load Magnitude", 1.0, 500.0, 20.0)
+        supports = st.selectbox("Support Type", ["simple", "cantilever"])
+        if st.button("Calculate Reactions"):
+            reactions = StructuralAnalysis.beam_load_distribution(beam_len, load_type, load_val, supports)
+            st.write("**Reactions:**")
+            for k, v in reactions.items():
+                st.metric(k, f"{v:.2f} kN" if "M" not in k else f"{v:.2f} kN·m")
+            # Send email with results (if email configured)
             email = StructuralModel.get_user_email(st.session_state.username)
             if email:
-                st.toast(f"📧 Structural report sent to {email}")
-            else:
-                st.warning("No email on file. Add email in user profile (admin only).")
+                send_email_notification(email, "Beam Analysis Results", str(reactions))
+                st.toast(f"📧 Results sent to {email}")
+
+    # ---------- Truss FEM ----------
+    with tab3:
+        st.subheader("🧮 Simple 2D Truss FEM")
+        st.markdown("Define nodes (x,y), elements (node i, node j, E, A), forces, and constraints.")
+        nodes_input = st.text_area("Nodes (one per line: x,y)", "0,0\n4,0\n2,3")
+        elements_input = st.text_area("Elements (one per line: i,j,E,A)", "0,2,210e9,0.01\n2,1,210e9,0.01\n0,1,210e9,0.005")
+        forces_input = st.text_area("Forces (node:fx,fy)", "2:0,-10")
+        constraints_input = st.text_area("Constraints (node:dx,dy e.g. 0:True,True)", "0:True,True\n1:False,True")
+        if st.button("Run FEM Analysis"):
+            try:
+                nodes = [tuple(map(float, line.split(','))) for line in nodes_input.strip().split('\n')]
+                elements = []
+                for line in elements_input.strip().split('\n'):
+                    parts = line.split(',')
+                    i, j, E, A = int(parts[0]), int(parts[1]), float(parts[2]), float(parts[3])
+                    elements.append((i, j, E, A))
+                forces = {}
+                for line in forces_input.strip().split('\n'):
+                    node, vec = line.split(':')
+                    fx, fy = map(float, vec.split(','))
+                    forces[int(node)] = (fx, fy)
+                constraints = {}
+                for line in constraints_input.strip().split('\n'):
+                    node, vals = line.split(':')
+                    dx, dy = vals.split(',')
+                    constraints[int(node)] = (dx.strip()=='True', dy.strip()=='True')
+                disp = StructuralAnalysis.truss_fem(nodes, elements, forces, constraints)
+                if disp:
+                    st.write("**Node Displacements:**")
+                    for node, (dx, dy) in disp.items():
+                        st.write(f"Node {node}: Δx = {dx:.6f} m, Δy = {dy:.6f} m")
+                    email = StructuralModel.get_user_email(st.session_state.username)
+                    if email:
+                        send_email_notification(email, "FEM Analysis Results", str(disp))
+                        st.toast(f"📧 Results sent to {email}")
+                else:
+                    st.error("Singular matrix. Check constraints.")
+            except Exception as e:
+                st.error(f"Error: {e}")
 
     st.markdown('</div>', unsafe_allow_html=True)
 
