@@ -10,7 +10,7 @@ import smtplib
 from email.message import EmailMessage
 import base64
 
-# Optional imports – app runs without them, just skip features
+# Optional imports – app works without them
 try:
     from streamlit_autorefresh import st_autorefresh
     AUTO_REFRESH = True
@@ -24,11 +24,10 @@ except ImportError:
     RSS_AVAILABLE = False
 
 # ------------------------------------------------------------------
-# MUST BE FIRST STREAMLIT COMMAND
+# PAGE CONFIG (must be first)
 # ------------------------------------------------------------------
-st.set_page_config(page_title="Arc OS", page_icon="🔄", layout="wide")
+st.set_page_config(page_title="Trading App", page_icon="📈", layout="wide")
 
-# Auto-refresh every 30 seconds (if module installed)
 if AUTO_REFRESH:
     st_autorefresh(interval=30000, key="datarefresh")
 
@@ -43,7 +42,7 @@ CRYPTO_NAMES = {"bitcoin": "BTC", "ethereum": "ETH", "ripple": "XRP",
 # DATABASE SETUP
 # ------------------------------------------------------------------
 def init_db():
-    conn = sqlite3.connect("arc_os.db")
+    conn = sqlite3.connect("trading_app.db")
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user')''')
@@ -51,13 +50,14 @@ def init_db():
         c.execute("ALTER TABLE users ADD COLUMN email TEXT")
     except sqlite3.OperationalError:
         pass
+    # Default admin account
     c.execute("SELECT COUNT(*) FROM users WHERE username='admin'")
     if c.fetchone()[0] == 0:
-        admin_hash = hashlib.sha256("arc2024".encode()).hexdigest()
+        admin_hash = hashlib.sha256("admin123".encode()).hexdigest()
         c.execute("INSERT INTO users (username, password_hash, email, role) VALUES (?, ?, ?, 'admin')",
-                  ("admin", admin_hash, "admin@arcos.pro"))
+                  ("admin", admin_hash, "admin@example.com"))
     else:
-        c.execute("UPDATE users SET email='admin@arcos.pro' WHERE username='admin' AND email IS NULL")
+        c.execute("UPDATE users SET email='admin@example.com' WHERE username='admin' AND email IS NULL")
     c.execute('''CREATE TABLE IF NOT EXISTS forex_quotes
                  (timestamp TEXT, pair TEXT, rate REAL)''')
     c.execute('''CREATE TABLE IF NOT EXISTS wallet_transactions
@@ -89,7 +89,7 @@ def init_db():
     return conn
 
 def get_db_connection():
-    return sqlite3.connect("arc_os.db")
+    return sqlite3.connect("trading_app.db")
 
 init_db()
 
@@ -118,7 +118,7 @@ def authenticate(username, password):
 def send_otp(email):
     otp = str(np.random.randint(100000, 999999))
     st.session_state.otp = otp
-    send_email_notification(email, "Arc OS OTP", f"Your one‑time password is: {otp}")
+    send_email_notification(email, "Your OTP", f"Your one‑time password is: {otp}")
     return otp
 
 def add_user(username, password, email, role="user"):
@@ -129,8 +129,8 @@ def add_user(username, password, email, role="user"):
         c.execute("INSERT INTO users (username, password_hash, email, role) VALUES (?, ?, ?, ?)",
                   (username, pwd_hash, email, role))
         conn.commit()
-        send_email_notification(email, "Account Created", f"Hello {username}, your Arc OS account has been created.")
-        return True, f"User '{username}' added successfully."
+        send_email_notification(email, "Account Created", f"Hello {username}, your account has been created.")
+        return True, f"User '{username}' added."
     except sqlite3.IntegrityError:
         return False, "Username already exists."
 
@@ -178,6 +178,23 @@ def send_email_notification(to_email, subject, body):
         return False
 
 # ------------------------------------------------------------------
+# TOAST FALLBACK (for older Streamlit versions)
+# ------------------------------------------------------------------
+def show_toast(message, type="info"):
+    """Safe toast that uses st.toast if available, else st.success/warning/error."""
+    try:
+        st.toast(message)
+    except AttributeError:
+        if type == "info":
+            st.info(message)
+        elif type == "success":
+            st.success(message)
+        elif type == "warning":
+            st.warning(message)
+        elif type == "error":
+            st.error(message)
+
+# ------------------------------------------------------------------
 # MOBILE WALLET
 # ------------------------------------------------------------------
 class MobileWallet:
@@ -187,7 +204,12 @@ class MobileWallet:
     def get_balance(username):
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT SUM(CASE WHEN type='deposit' THEN amount WHEN type='withdrawal' THEN -amount WHEN type='trade' THEN amount ELSE 0 END) FROM wallet_transactions WHERE username=? AND status='completed'", (username,))
+        c.execute("""SELECT SUM(CASE WHEN type='deposit' THEN amount
+                                     WHEN type='withdrawal' THEN -amount
+                                     WHEN type='trade' THEN amount
+                                     ELSE 0 END)
+                     FROM wallet_transactions
+                     WHERE username=? AND status='completed'""", (username,))
         row = c.fetchone()
         return row[0] if row[0] is not None else 0.0
 
@@ -351,7 +373,7 @@ class ForexEngine:
         return pd.DataFrame({"Time": times, "Volume": volume})
 
 # ------------------------------------------------------------------
-# TECHNICAL INDICATORS (RSI, MACD, Bollinger)
+# TECHNICAL INDICATORS
 # ------------------------------------------------------------------
 class TradingSignals:
     @staticmethod
@@ -424,7 +446,7 @@ class TradingSignals:
         return signals
 
 # ------------------------------------------------------------------
-# FORECAST (weighted linear)
+# FORECAST
 # ------------------------------------------------------------------
 def weighted_linear_fit(x, y, tau=7):
     n = len(x)
@@ -570,44 +592,56 @@ class TradingModule:
         trade = c.fetchone()
         if not trade:
             return False, "Trade not found."
-        (id, username, symbol, trade_type, open_price, amount, leverage,
-         stop_loss, take_profit, ts, status, _, _, _) = trade
+        # 14 columns: id,username,symbol,trade_type,open_price,amount,leverage,stop_loss,take_profit,timestamp,status,close_price,close_timestamp,pnl
+        id, username, symbol, trade_type, open_price, amount, leverage, sl, tp, ts, status, cp, cts, pnl = trade
         if status != 'open':
             return False, "Trade already closed."
-        pnl = (close_price - open_price) * amount * leverage if trade_type == 'buy' else (open_price - close_price) * amount * leverage
+        # compute P&L
+        if trade_type == 'buy':
+            pnl_val = (close_price - open_price) * amount * leverage
+        else:
+            pnl_val = (open_price - close_price) * amount * leverage
         close_ts = datetime.now().isoformat()
         c.execute("UPDATE trades SET status='closed', close_price=?, close_timestamp=?, pnl=? WHERE id=?",
-                  (close_price, close_ts, round(pnl, 4), trade_id))
+                  (close_price, close_ts, round(pnl_val, 4), trade_id))
+        # reflect in wallet
         ref = f"TRD{trade_id}{close_ts}"
         c.execute('''INSERT INTO wallet_transactions (username, type, amount, phone, provider, reference, status, timestamp)
                      VALUES (?, 'trade', ?, 'system', 'Trading', ?, 'completed', ?)''',
-                  (username, round(pnl, 4), ref, close_ts))
+                  (username, round(pnl_val, 4), ref, close_ts))
         conn.commit()
-        return True, f"Trade closed. P&L: ${pnl:.2f}"
+        return True, f"Trade closed. P&L: ${pnl_val:.2f}"
 
     @staticmethod
     def check_stop_loss_take_profit(username):
         positions = TradingModule.get_open_positions(username)
+        if positions.empty:
+            return
         for _, pos in positions.iterrows():
+            # get current price
             if pos['symbol'] in ForexEngine.PAIRS:
+                if 'forex_data' not in st.session_state:
+                    continue
                 current_price = st.session_state.forex_data.iloc[-1][pos['symbol']]
             else:
-                live = st.session_state.crypto_live_prices
-                if live is not None:
-                    row = live[live['Coin']==CRYPTO_NAMES.get(pos['symbol'],'')]
-                    current_price = row.iloc[0]['Price (USD)'] if not row.empty else pos['open_price']
-                else:
+                if st.session_state.get('crypto_live_prices') is None:
                     continue
-            if pos['stop_loss'] is not None and pos['stop_loss'] > 0:
-                if (pos['trade_type'] == 'buy' and current_price <= pos['stop_loss']) or \
-                   (pos['trade_type'] == 'sell' and current_price >= pos['stop_loss']):
+                row = st.session_state.crypto_live_prices[st.session_state.crypto_live_prices['Coin'] == CRYPTO_NAMES.get(pos['symbol'], '')]
+                if row.empty:
+                    continue
+                current_price = row.iloc[0]['Price (USD)']
+            sl = pos['stop_loss']
+            tp = pos['take_profit']
+            if sl is not None and sl > 0:
+                if (pos['trade_type'] == 'buy' and current_price <= sl) or \
+                   (pos['trade_type'] == 'sell' and current_price >= sl):
                     TradingModule.close_trade(pos['id'], current_price)
-                    st.toast(f"Stop‑loss triggered for {pos['symbol']} at {current_price}")
-            if pos['take_profit'] is not None and pos['take_profit'] > 0:
-                if (pos['trade_type'] == 'buy' and current_price >= pos['take_profit']) or \
-                   (pos['trade_type'] == 'sell' and current_price <= pos['take_profit']):
+                    show_toast(f"Stop‑loss triggered for {pos['symbol']} at {current_price}", type="warning")
+            if tp is not None and tp > 0:
+                if (pos['trade_type'] == 'buy' and current_price >= tp) or \
+                   (pos['trade_type'] == 'sell' and current_price <= tp):
                     TradingModule.close_trade(pos['id'], current_price)
-                    st.toast(f"Take‑profit triggered for {pos['symbol']} at {current_price}")
+                    show_toast(f"Take‑profit triggered for {pos['symbol']} at {current_price}", type="success")
 
     @staticmethod
     def get_trade_history(username, limit=30):
@@ -630,26 +664,26 @@ def check_price_alerts(username):
         else:
             live = st.session_state.crypto_live_prices
             if live is not None:
-                row = live[live['Coin']==CRYPTO_NAMES.get(symbol, '')]
+                row = live[live['Coin'] == CRYPTO_NAMES.get(symbol, '')]
                 current = row.iloc[0]['Price (USD)'] if not row.empty else None
             else:
                 continue
         if current is not None:
             if direction == 'above' and current >= price_target:
-                st.toast(f"🚨 {symbol} is now above {price_target}!")
+                show_toast(f"🚨 {symbol} is now above {price_target}!")
                 c = conn.cursor()
                 c.execute("DELETE FROM alerts WHERE username=? AND symbol=? AND price=? AND direction=?",
                           (username, symbol, price_target, direction))
                 conn.commit()
             elif direction == 'below' and current <= price_target:
-                st.toast(f"🚨 {symbol} is now below {price_target}!")
+                show_toast(f"🚨 {symbol} is now below {price_target}!")
                 c = conn.cursor()
                 c.execute("DELETE FROM alerts WHERE username=? AND symbol=? AND price=? AND direction=?",
                           (username, symbol, price_target, direction))
                 conn.commit()
 
 # ------------------------------------------------------------------
-# BACKTESTING (simple RSI strategy)
+# BACKTESTING
 # ------------------------------------------------------------------
 def backtest_rsi_strategy(prices, rsi_period=14, oversold=30, overbought=70):
     rsi = TradingSignals.compute_rsi(prices, rsi_period)
@@ -667,11 +701,11 @@ def backtest_rsi_strategy(prices, rsi_period=14, oversold=30, overbought=70):
     return equity
 
 # ------------------------------------------------------------------
-# SENTIMENT ANALYSIS (RSS)
+# SENTIMENT
 # ------------------------------------------------------------------
 def fetch_market_sentiment():
     if not RSS_AVAILABLE:
-        return np.random.randint(-3, 4)  # fallback random
+        return np.random.randint(-3, 4)
     sentiment_score = 0
     try:
         feed = feedparser.parse("https://www.investing.com/rss/news_25.rss")
@@ -697,12 +731,12 @@ def show_logo():
     <div style="display:flex; justify-content:center;">
         <svg width="90" height="90" viewBox="0 0 100 100">
             <defs>
-                <linearGradient id="arcGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
                     <stop offset="0%" style="stop-color:#00d2ff;stop-opacity:1" />
                     <stop offset="100%" style="stop-color:#3a7bd5;stop-opacity:1" />
                 </linearGradient>
             </defs>
-            <path d="M15,80 A60,60 0 0,1 85,80" stroke="url(#arcGrad)" stroke-width="5" fill="none" stroke-linecap="round"/>
+            <path d="M15,80 A60,60 0 0,1 85,80" stroke="url(#grad)" stroke-width="5" fill="none" stroke-linecap="round"/>
             <circle cx="50" cy="68" r="6" fill="#ff4b2b" filter="drop-shadow(0 0 6px #ff4b2b)"/>
         </svg>
     </div>
@@ -771,7 +805,7 @@ def logout():
     st.rerun()
 
 # ------------------------------------------------------------------
-# UI THEME TOGGLE
+# UI THEME
 # ------------------------------------------------------------------
 theme = st.sidebar.radio("🎨 Theme", ["dark", "light"], horizontal=True, index=0 if st.session_state.get("theme","dark")=="dark" else 1)
 st.session_state.theme = theme
@@ -796,7 +830,7 @@ st.markdown(f"""
 </style>""", unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
-# DATA INIT (session state)
+# DATA INIT
 # ------------------------------------------------------------------
 if 'role' not in st.session_state:
     conn = get_db_connection()
@@ -824,7 +858,7 @@ if 'crypto_daily_hist' not in st.session_state:
                     live_dict[cid] = row["Price (USD)"]
     st.session_state.crypto_daily_hist = CryptoForecast.generate_daily_history(90, live_dict)
 
-# Check stop‑loss / take‑profit and alerts
+# Check stop‑loss / take‑profit and alerts at every rerun
 TradingModule.check_stop_loss_take_profit(st.session_state.username)
 check_price_alerts(st.session_state.username)
 
@@ -968,7 +1002,6 @@ elif mode == "₿ Crypto Tracker":
     hist = CryptoEngine.get_historical(coin_hist, 7)
     if hist is not None:
         st.line_chart(hist)
-    # Staking simulator
     with st.expander("🥩 Crypto Staking Simulator"):
         stake_coin = st.selectbox("Coin to stake", CRYPTO_COINS, format_func=lambda x: CRYPTO_NAMES[x])
         stake_amount = st.number_input("Amount", min_value=0.01, value=1.0)
@@ -979,7 +1012,7 @@ elif mode == "₿ Crypto Tracker":
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
-# JUP AI (with backtesting)
+# JUP AI
 # ------------------------------------------------------------------
 elif mode == "🤖 Jup AI":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
@@ -1008,7 +1041,6 @@ elif mode == "🤖 Jup AI":
         else:
             decision = "HOLD"
         st.markdown(f"### Decision: **{decision}**")
-        # Backtest chart
         prices = df[pair].values
         equity = backtest_rsi_strategy(prices)
         st.line_chart(pd.DataFrame({"Equity": equity}))
@@ -1029,7 +1061,7 @@ elif mode == "🤖 Jup AI":
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
-# TRADING (with advanced orders, risk dashboard, export)
+# TRADING
 # ------------------------------------------------------------------
 elif mode == "📈 Trading":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
@@ -1065,12 +1097,13 @@ elif mode == "📈 Trading":
             if total_value > balance:
                 st.error("Insufficient balance.")
             else:
-                TradingModule.open_trade(st.session_state.username, symbol, trade_type, amount, latest_price, leverage,
-                                         stop_loss if stop_loss>0 else None, take_profit if take_profit>0 else None)
+                TradingModule.open_trade(
+                    st.session_state.username, symbol, trade_type, amount, latest_price, leverage,
+                    stop_loss if stop_loss > 0 else None,
+                    take_profit if take_profit > 0 else None)
                 st.success(f"{trade_type.upper()} order placed.")
                 st.rerun()
 
-    # Risk Dashboard
     positions = TradingModule.get_open_positions(st.session_state.username)
     if not positions.empty:
         total_exposure = 0
@@ -1079,7 +1112,6 @@ elif mode == "📈 Trading":
         st.metric("Total Exposure", f"${total_exposure:,.2f}")
         st.metric("Margin Level", f"{(balance / total_exposure * 100) if total_exposure else 100:.1f}%")
 
-    # Open positions
     st.subheader("📊 Open Positions")
     if not positions.empty:
         for idx, pos in positions.iterrows():
@@ -1115,7 +1147,6 @@ elif mode == "📈 Trading":
     else:
         st.info("No open positions.")
 
-    # Price alerts
     st.subheader("🔔 Set Price Alert")
     with st.form("alert_form"):
         alert_symbol = st.selectbox("Symbol", ForexEngine.PAIRS + list(CRYPTO_NAMES.values()))
@@ -1129,7 +1160,6 @@ elif mode == "📈 Trading":
             conn.commit()
             st.success("Alert set!")
 
-    # Trade history & export
     st.subheader("📜 Trade History")
     history = TradingModule.get_trade_history(st.session_state.username)
     if not history.empty:
@@ -1214,7 +1244,7 @@ elif mode == "💳 Mobile Wallet":
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
-# LEADERBOARD (simple)
+# LEADERBOARD
 # ------------------------------------------------------------------
 if st.button("🏆 Leaderboard"):
     conn = get_db_connection()
@@ -1225,3 +1255,10 @@ if st.button("🏆 Leaderboard"):
     for i, (user, bal) in enumerate(balances[:10]):
         st.write(f"{i+1}. {user}: ${bal:,.2f}")
 
+# PWA note
+st.markdown("""
+---
+**📲 Install as App (PWA):**  
+Embed this app in an iframe on a static site with a `manifest.json` and service worker.  
+See the [Streamlit PWA Guide](https://blog.streamlit.io/how-to-make-a-pwa-with-streamlit/) for details.
+""")
