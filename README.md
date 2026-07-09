@@ -1,2 +1,2 @@
 # Jupitor
-Sai and Random
+Trading Bot
