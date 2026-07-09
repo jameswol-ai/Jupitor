@@ -17,19 +17,17 @@ CRYPTO_NAMES = {"bitcoin": "BTC", "ethereum": "ETH", "ripple": "XRP",
                 "cardano": "ADA", "solana": "SOL"}
 
 # ------------------------------------------------------------------
-# DATABASE SETUP (MUST RUN FIRST)
+# DATABASE SETUP
 # ------------------------------------------------------------------
 def init_db():
     conn = sqlite3.connect("arc_os.db")
     c = conn.cursor()
-
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (username TEXT PRIMARY KEY, password_hash TEXT, role TEXT DEFAULT 'user')''')
     try:
         c.execute("ALTER TABLE users ADD COLUMN email TEXT")
     except sqlite3.OperationalError:
         pass
-
     c.execute("SELECT COUNT(*) FROM users WHERE username='admin'")
     if c.fetchone()[0] == 0:
         admin_hash = hashlib.sha256("arc2024".encode()).hexdigest()
@@ -37,19 +35,8 @@ def init_db():
                   ("admin", admin_hash, "admin@arcos.pro"))
     else:
         c.execute("UPDATE users SET email='admin@arcos.pro' WHERE username='admin' AND email IS NULL")
-
     c.execute('''CREATE TABLE IF NOT EXISTS forex_quotes
                  (timestamp TEXT, pair TEXT, rate REAL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS structural_analyses
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  timestamp TEXT, beam_length REAL, load_magnitude REAL,
-                  load_type TEXT, material TEXT, moment REAL, shear REAL,
-                  stress_bending REAL, stress_shear REAL, deflection REAL,
-                  status TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS building_elements
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  username TEXT, type TEXT, subtype TEXT,
-                  params TEXT, timestamp TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS wallet_transactions
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   username TEXT, type TEXT, amount REAL,
@@ -94,7 +81,6 @@ def add_user(username, password, email, role="user"):
                   (username, pwd_hash, email, role))
         conn.commit()
         send_email_notification(email, "Account Created", f"Hello {username}, your Arc OS account has been created.")
-        st.toast(f"📧 Account created for {email} (email sent)")
         return True, f"User '{username}' added successfully."
     except sqlite3.IntegrityError:
         return False, "Username already exists."
@@ -140,7 +126,7 @@ def login():
             st.rerun()
 
 # ------------------------------------------------------------------
-# EMAIL SENDING (via Streamlit secrets)
+# EMAIL SENDING
 # ------------------------------------------------------------------
 def send_email_notification(to_email, subject, body):
     try:
@@ -181,13 +167,12 @@ if not st.session_state.authenticated:
     st.stop()
 
 def logout():
-    for key in ["authenticated", "username", "role", "show_registration", "mode"]:
-        if key in st.session_state:
-            del st.session_state[key]
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
     st.rerun()
 
 # ------------------------------------------------------------------
-# MOBILE MONEY WALLET (Simulated East‑African Integration)
+# MOBILE MONEY WALLET (fixed errors)
 # ------------------------------------------------------------------
 class MobileWallet:
     PROVIDERS = ["M-Pesa (Kenya)", "Airtel Money (Uganda)", "MTN MoMo (Uganda)"]
@@ -222,7 +207,6 @@ class MobileWallet:
 
     @staticmethod
     def withdraw_request(username, phone, amount, provider):
-        # Check balance first
         balance = MobileWallet.get_balance(username)
         if amount > balance:
             return None, "Insufficient balance."
@@ -253,7 +237,7 @@ class MobileWallet:
         return df
 
 # ------------------------------------------------------------------
-# FOREX ENGINE (Real-time via ExchangeRate-API)
+# FOREX ENGINE (unchanged)
 # ------------------------------------------------------------------
 class ForexEngine:
     PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "UGX/USD", "KES/USD", "SSP/USD"]
@@ -354,17 +338,6 @@ class ForexEngine:
         return returns.corr().round(2)
 
     @staticmethod
-    def generate_economic_calendar():
-        events = [
-            {"Time": "10:00", "Event": "UGX Inflation Rate (MoM)", "Impact": "High", "Forecast": "0.2%", "Previous": "0.1%"},
-            {"Time": "12:30", "Event": "KES GDP Growth Rate (YoY)", "Impact": "High", "Forecast": "5.2%", "Previous": "5.0%"},
-            {"Time": "14:00", "Event": "SSP Trade Balance", "Impact": "Medium", "Forecast": "-$150M", "Previous": "-$140M"},
-            {"Time": "16:00", "Event": "EUR/USD Consumer Confidence", "Impact": "Low", "Forecast": "-15.2", "Previous": "-15.0"},
-            {"Time": "18:30", "Event": "USD/JPY Manufacturing PMI", "Impact": "Medium", "Forecast": "49.8", "Previous": "50.1"},
-        ]
-        return pd.DataFrame(events)
-
-    @staticmethod
     def get_volume(minutes=60):
         np.random.seed(99)
         now = datetime.now()
@@ -373,7 +346,7 @@ class ForexEngine:
         return pd.DataFrame({"Time": times, "Volume": volume})
 
 # ------------------------------------------------------------------
-# AI TRADING SIGNALS (RSI + MACD)
+# TRADING SIGNALS (RSI + MACD) – used by Jup AI
 # ------------------------------------------------------------------
 class TradingSignals:
     @staticmethod
@@ -381,7 +354,6 @@ class TradingSignals:
         deltas = np.diff(prices)
         if len(deltas) < period:
             return np.full_like(prices, np.nan)
-        # Initial SMA
         up = np.mean(np.maximum(deltas[:period], 0))
         down = np.mean(np.abs(np.minimum(deltas[:period], 0)))
         rsi = np.zeros_like(prices)
@@ -434,51 +406,11 @@ class TradingSignals:
         return signals
 
 # ------------------------------------------------------------------
-# AI MARKET ADVISOR
-# ------------------------------------------------------------------
-def ai_market_advisor():
-    with st.expander("🧠 AI Market Advisor – What’s moving & what to trade", expanded=False):
-        st.markdown("### Market Health Snapshot")
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.session_state.mode.startswith("💱"):
-                forex_df = st.session_state.forex_data
-                summary = ForexEngine.get_summary(forex_df)
-                signals_found = []
-                for pair in ForexEngine.PAIRS:
-                    sigs = TradingSignals.generate_signals(forex_df, pair)
-                    for sig_type, reason in sigs:
-                        signals_found.append(f"{sig_type} {pair}: {reason}")
-                if signals_found:
-                    st.success("Active Forex signals:\n" + "\n".join(signals_found))
-                else:
-                    st.info("No strong forex signals at the moment. Wait for clearer RSI/MACD crossovers.")
-                # List top movers
-                top_movers = summary.sort_values("Change %", key=lambda x: x.str.rstrip('%').astype(float), ascending=False)
-                st.write("**Top movers (24h):**")
-                st.dataframe(top_movers[["Pair","Last","Change %"]].head(3), hide_index=True)
-        with col2:
-            if st.session_state.mode.startswith("₿"):
-                crypto_df = st.session_state.crypto_live_prices
-                if crypto_df is not None:
-                    st.write("**Crypto Snapshot:**")
-                    st.dataframe(crypto_df, hide_index=True)
-                    # basic advice
-                    for _, row in crypto_df.iterrows():
-                        if row["24h Change %"] > 5:
-                            st.warning(f"{row['Coin']} is up {row['24h Change %']}% – consider taking profit.")
-                        elif row["24h Change %"] < -5:
-                            st.warning(f"{row['Coin']} is down {row['24h Change %']}% – possible dip buy.")
-        st.markdown("---")
-        st.caption("Advice is based on technical indicators (RSI & MACD) and current price action. Always do your own research.")
-
-# ------------------------------------------------------------------
-# FOREX & CRYPTO FORECAST ENGINE (improved)
+# IMPROVED FORECAST (weighted linear)
 # ------------------------------------------------------------------
 def weighted_linear_fit(x, y, tau=7):
-    """Exponentially weighted least squares for forecast."""
     n = len(x)
-    weights = np.exp(-np.arange(n)[::-1] / tau)  # more weight to recent
+    weights = np.exp(-np.arange(n)[::-1] / tau)
     W = np.diag(weights)
     X = np.column_stack([np.ones_like(x), x])
     XtW = X.T @ W
@@ -514,11 +446,10 @@ class ForexForecast:
         series = df[pair].tail(30)
         x = np.arange(len(series))
         y = series.values
-        coeffs = weighted_linear_fit(x, y, tau=7)  # improved
+        coeffs = weighted_linear_fit(x, y, tau=7)
         last_idx = len(series) - 1
         future_x = np.array([last_idx + d for d in range(1, horizon_days+1)])
-        forecast_y = coeffs[0] + coeffs[1] * future_x
-        return np.round(forecast_y, 4)
+        return np.round(coeffs[0] + coeffs[1] * future_x, 4)
 
 class CryptoForecast:
     BASE_PRICES = {"bitcoin": 67000, "ethereum": 3400, "ripple": 0.6, "cardano": 0.45, "solana": 170}
@@ -546,14 +477,13 @@ class CryptoForecast:
         series = df[coin].tail(30)
         x = np.arange(len(series))
         y = series.values
-        coeffs = weighted_linear_fit(x, y, tau=7)  # improved
+        coeffs = weighted_linear_fit(x, y, tau=7)
         last_idx = len(series) - 1
         future_x = np.array([last_idx + d for d in range(1, horizon_days+1)])
-        forecast_y = coeffs[0] + coeffs[1] * future_x
-        return np.round(forecast_y, 2)
+        return np.round(coeffs[0] + coeffs[1] * future_x, 2)
 
 # ------------------------------------------------------------------
-# CRYPTO ENGINE (Live via CoinGecko)
+# CRYPTO ENGINE (unchanged)
 # ------------------------------------------------------------------
 class CryptoEngine:
     @staticmethod
@@ -592,235 +522,86 @@ class CryptoEngine:
             return None
 
 # ------------------------------------------------------------------
-# ADVANCED STRUCTURAL ANALYSIS (unchanged)
+# JUP AI – TRADING NEWS AGENT (replaces Structural Pro)
 # ------------------------------------------------------------------
-class StructuralAnalysis:
-    # ... (identical to original) ...
-    @staticmethod
-    def truss_fem(nodes, elements, forces, constraints):
-        n_nodes = len(nodes)
-        ndof = 2 * n_nodes
-        K = np.zeros((ndof, ndof))
-        for (i, j, E, A) in elements:
-            xi, yi = nodes[i]
-            xj, yj = nodes[j]
-            L = np.sqrt((xj-xi)**2 + (yj-yi)**2)
-            if L == 0:
-                continue
-            c = (xj - xi) / L
-            s = (yj - yi) / L
-            k_local = (E * A / L) * np.array([
-                [c*c, c*s, -c*c, -c*s],
-                [c*s, s*s, -c*s, -s*s],
-                [-c*c, -c*s, c*c, c*s],
-                [-c*s, -s*s, c*s, s*s]
-            ])
-            dof_map = [2*i, 2*i+1, 2*j, 2*j+1]
-            for a in range(4):
-                for b in range(4):
-                    K[dof_map[a], dof_map[b]] += k_local[a, b]
-        free_dofs = []
-        for node in range(n_nodes):
-            if not constraints.get(node, (False, False))[0]:
-                free_dofs.append(2*node)
-            if not constraints.get(node, (False, False))[1]:
-                free_dofs.append(2*node+1)
-        K_free = K[np.ix_(free_dofs, free_dofs)]
-        F_free = np.zeros(len(free_dofs))
-        for node, (fx, fy) in forces.items():
-            if 2*node in free_dofs:
-                idx = free_dofs.index(2*node)
-                F_free[idx] = fx
-            if 2*node+1 in free_dofs:
-                idx = free_dofs.index(2*node+1)
-                F_free[idx] = fy
-        try:
-            u_free = np.linalg.solve(K_free, F_free)
-        except np.linalg.LinAlgError:
-            return None
-        u = np.zeros(ndof)
-        for i, dof in enumerate(free_dofs):
-            u[dof] = u_free[i]
-        disp = {i: (u[2*i], u[2*i+1]) for i in range(n_nodes)}
-        return disp
+def jup_ai_tab():
+    st.subheader("🤖 Jup AI · Trading Intelligence")
+    st.caption("Parametric news agent – BUY, HOLD, SELL with trade time frames.")
+    # Simulated news headlines
+    st.markdown("**📰 Market News (simulated)**")
+    news = [
+        "Fed signals possible rate cut in next meeting.",
+        "Oil prices surge on supply disruption fears.",
+        "BTC whales accumulate ahead of halving event.",
+        "UGX weakens on political uncertainty.",
+        "Ethereum DeFi TVL hits new all-time high."
+    ]
+    for item in news:
+        st.info(item)
 
-    @staticmethod
-    def beam_load_distribution(beam_length, load_type, load_mag, supports):
-        if load_type == "Uniform (kN/m)":
-            w = load_mag
-            if supports == "simple":
-                Ra = w * beam_length / 2
-                Rb = w * beam_length / 2
-                return {"Ra": Ra, "Rb": Rb}
-            else:
-                M_fixed = w * beam_length**2 / 2
-                R_fixed = w * beam_length
-                return {"R_fixed": R_fixed, "M_fixed": M_fixed}
+    # Choose market
+    market = st.radio("Market", ["Forex", "Crypto"], horizontal=True)
+    if market == "Forex":
+        pair = st.selectbox("Select currency pair", ForexEngine.PAIRS)
+        df = st.session_state.forex_data
+        signals = TradingSignals.generate_signals(df, pair)
+        # Trade decision logic
+        buy_signals = sum(1 for s in signals if s[0]=="BUY")
+        sell_signals = sum(1 for s in signals if s[0]=="SELL")
+        if buy_signals > sell_signals:
+            decision = "BUY"
+        elif sell_signals > buy_signals:
+            decision = "SELL"
         else:
-            P = load_mag
-            if supports == "simple":
-                Ra = P / 2
-                Rb = P / 2
-                return {"Ra": Ra, "Rb": Rb}
-            else:
-                R_fixed = P
-                M_fixed = P * beam_length
-                return {"R_fixed": R_fixed, "M_fixed": M_fixed}
-
-# ------------------------------------------------------------------
-# BUILDING DESIGNER (3D)
-# ------------------------------------------------------------------
-class StructuralModel:
-    # ... (identical to original) ...
-    ELEMENT_TYPES = {
-        "column": ["rectangular", "circular"],
-        "beam": ["rectangular"],
-        "slab": ["rectangular"],
-        "wall": ["rectangular"],
-        "opening": ["door", "window"]
-    }
-
-    @staticmethod
-    def add_element(username, elem_type, subtype, params):
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute('''INSERT INTO building_elements (username, type, subtype, params, timestamp)
-                     VALUES (?, ?, ?, ?, ?)''',
-                  (username, elem_type, subtype, json.dumps(params), datetime.now().isoformat()))
-        conn.commit()
-        user_email = StructuralModel.get_user_email(username)
-        if user_email:
-            send_email_notification(user_email, "Element Added", f"A new {elem_type} was added to your project.")
-            st.toast(f"📧 Element added. Report sent to {user_email}")
-
-    @staticmethod
-    def get_user_email(username):
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("SELECT email FROM users WHERE username=?", (username,))
-        row = c.fetchone()
-        return row[0] if row and row[0] else None
-
-    @staticmethod
-    def get_elements(username):
-        conn = get_db_connection()
-        df = pd.read_sql_query(
-            "SELECT * FROM building_elements WHERE username=? ORDER BY timestamp DESC",
-            conn, params=(username,))
-        if not df.empty:
-            df["params"] = df["params"].apply(json.loads)
-        return df
-
-    @staticmethod
-    def delete_element(element_id):
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("DELETE FROM building_elements WHERE id=?", (element_id,))
-        conn.commit()
-
-    @staticmethod
-    def generate_3d_scene(elements_df):
-        objects_js = []
-        for _, row in elements_df.iterrows():
-            p = row["params"]
-            t = row["type"]
-            stype = row["subtype"]
-            if t == "column":
-                x = p.get("x", 0); z = p.get("z", 0); height = p.get("height", 3)
-                if stype == "circular":
-                    radius = p.get("radius", 0.15)
-                    obj = f"{{type:'cylinder', pos:[{x}, {height/2}, {z}], size:[{radius}, {height}, {radius}], color:0x00aaff}}"
+            decision = "HOLD"
+        st.markdown(f"### Decision: **{decision}**")
+        st.caption("Based on RSI & MACD crossovers.")
+        # Trade time suggestion
+        time_frame = "Scalp (mins)" if abs(df[pair].pct_change().iloc[-1])>0.002 else "Swing (days)"
+        st.metric("Suggested Trade Time", time_frame)
+        # Forecast chart
+        st.subheader("📈 Forecast (Daily, Weekly, Monthly)")
+        horizon = st.selectbox("Forecast horizon", ["1 Day", "7 Days (Week)", "30 Days (Month)"])
+        days = {"1 Day":1, "7 Days (Week)":7, "30 Days (Month)":30}[horizon]
+        daily_hist = st.session_state.forex_daily_hist
+        fcast = ForexForecast.forecast(daily_hist, days, pair)
+        hist_part = daily_hist[pair].tail(30)
+        idx_hist = list(hist_part.index)
+        idx_fut = pd.date_range(idx_hist[-1] + pd.Timedelta(days=1), periods=days, freq='D')
+        combined = np.concatenate([hist_part.values, fcast])
+        chart = pd.Series(combined, index=list(idx_hist)+list(idx_fut))
+        st.line_chart(chart)
+    else:
+        coin = st.selectbox("Select coin", CRYPTO_COINS, format_func=lambda x: CRYPTO_NAMES[x])
+        # Simple sentiment from 24h change
+        live = st.session_state.crypto_live_prices
+        if live is not None:
+            row = live[live['Coin']==CRYPTO_NAMES[coin]]
+            if not row.empty:
+                change = row.iloc[0]['24h Change %']
+                if change > 3:
+                    decision = "SELL"
+                elif change < -3:
+                    decision = "BUY"
                 else:
-                    w = p.get("width", 0.3); d = p.get("depth", 0.3)
-                    obj = f"{{type:'box', pos:[{x}, {height/2}, {z}], size:[{w}, {height}, {d}], color:0x00aaff}}"
-            elif t == "beam":
-                x1 = p.get("x1",0); z1 = p.get("z1",0); x2 = p.get("x2",4); z2 = p.get("z2",0)
-                length = np.sqrt((x2-x1)**2 + (z2-z1)**2)
-                mid_x = (x1+x2)/2; mid_z = (z1+z2)/2
-                y = p.get("y", 3)
-                w = p.get("width", 0.2); d = p.get("depth", 0.3)
-                angle = np.arctan2(z2-z1, x2-x1)
-                obj = f"{{type:'box', pos:[{mid_x}, {y}, {mid_z}], size:[{length}, {d}, {w}], color:0xffaa00, rotY:{angle}}}"
-            elif t == "slab":
-                x = p.get("x",0); z = p.get("z",0)
-                w = p.get("width",4); d = p.get("depth",4)
-                thickness = p.get("thickness",0.15)
-                y = p.get("y",3)
-                obj = f"{{type:'box', pos:[{x}, {y}, {z}], size:[{w}, {thickness}, {d}], color:0x888888}}"
-            elif t == "wall":
-                x1 = p.get("x1",0); z1 = p.get("z1",0); x2 = p.get("x2",4); z2 = p.get("z2",0)
-                length = np.sqrt((x2-x1)**2 + (z2-z1)**2)
-                mid_x = (x1+x2)/2; mid_z = (z1+z2)/2
-                height = p.get("height",3); thickness = p.get("thickness",0.15)
-                y = height/2
-                angle = np.arctan2(z2-z1, x2-x1)
-                obj = f"{{type:'box', pos:[{mid_x}, {y}, {mid_z}], size:[{length}, {height}, {thickness}], color:0xcccccc, rotY:{angle}}}"
-            elif t == "opening":
-                pos_x = p.get("pos_x",0); pos_z = p.get("pos_z",0)
-                width = p.get("width",1); height = p.get("height",2.1)
-                color = 0x8B4513 if stype == "door" else 0xADD8E6
-                obj = f"{{type:'box', pos:[{pos_x}, {height/2}, {pos_z}], size:[{width}, {height}, 0.1], color:{color}}}"
-            objects_js.append(obj)
-        objects_str = ",\n".join(objects_js)
-
-        html = f"""
-        <!DOCTYPE html>
-        <html><head><style>body{{margin:0;overflow:hidden;}}</style>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script></head>
-        <body><script>
-            const scene = new THREE.Scene(); scene.background = new THREE.Color(0x1a1a2e);
-            const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 1000);
-            camera.position.set(8, 5, 8); camera.lookAt(2, 1.5, 2);
-            const renderer = new THREE.WebGLRenderer({{antialias: true}});
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            document.body.appendChild(renderer.domElement);
-            scene.add(new THREE.AmbientLight(0x404066));
-            const dirLight = new THREE.DirectionalLight(0xffffff,1); dirLight.position.set(5,10,7); scene.add(dirLight);
-            scene.add(new THREE.GridHelper(10,20,0x336699,0x224466));
-
-            const objects = [{objects_str}];
-            objects.forEach(obj => {{
-                let mesh;
-                if (obj.type === 'box') {{
-                    mesh = new THREE.Mesh(
-                        new THREE.BoxGeometry(obj.size[0], obj.size[1], obj.size[2]),
-                        new THREE.MeshPhongMaterial({{color: obj.color, transparent: true, opacity: 0.9}})
-                    );
-                }} else if (obj.type === 'cylinder') {{
-                    mesh = new THREE.Mesh(
-                        new THREE.CylinderGeometry(obj.size[0], obj.size[0], obj.size[1], 32),
-                        new THREE.MeshPhongMaterial({{color: obj.color, transparent: true, opacity: 0.9}})
-                    );
-                }}
-                mesh.position.set(obj.pos[0], obj.pos[1], obj.pos[2]);
-                if (obj.rotY) mesh.rotation.y = obj.rotY;
-                scene.add(mesh);
-            }});
-
-            let isDragging = false, prev = {{x:0,y:0}};
-            renderer.domElement.addEventListener('mousedown', e=>{{ isDragging=true; prev.x=e.clientX; prev.y=e.clientY; }});
-            renderer.domElement.addEventListener('mouseup', ()=>isDragging=false);
-            renderer.domElement.addEventListener('mousemove', e=>{{
-                if(isDragging) {{
-                    camera.position.x += (e.clientX - prev.x)*0.01;
-                    camera.position.y -= (e.clientY - prev.y)*0.01;
-                    camera.lookAt(2,1.5,2);
-                    prev.x=e.clientX; prev.y=e.clientY;
-                }}
-            }});
-            renderer.domElement.addEventListener('wheel', e=>{{
-                camera.position.z += e.deltaY*0.01;
-                camera.lookAt(2,1.5,2);
-                e.preventDefault();
-            }});
-            function animate() {{ requestAnimationFrame(animate); renderer.render(scene,camera); }}
-            animate();
-        </script></body></html>
-        """
-        return html
+                    decision = "HOLD"
+                st.markdown(f"### Decision: **{decision}**")
+                st.caption("Based on 24h momentum.")
+                time_frame = "Scalp (minutes)" if abs(change)>5 else "Swing (days)"
+                st.metric("Suggested Trade Time", time_frame)
+        daily_hist = st.session_state.crypto_daily_hist
+        horizon = st.selectbox("Forecast horizon", ["1 Day", "7 Days (Week)", "30 Days (Month)"])
+        days = {"1 Day":1, "7 Days (Week)":7, "30 Days (Month)":30}[horizon]
+        fcast = CryptoForecast.forecast(daily_hist, days, coin)
+        hist_part = daily_hist[coin].tail(30)
+        idx_hist = list(hist_part.index)
+        idx_fut = pd.date_range(idx_hist[-1] + pd.Timedelta(days=1), periods=days, freq='D')
+        combined = np.concatenate([hist_part.values, fcast])
+        chart = pd.Series(combined, index=list(idx_hist)+list(idx_fut))
+        st.line_chart(chart)
 
 # ------------------------------------------------------------------
-# STREAMLIT UI
+# UI & SESSION STATE
 # ------------------------------------------------------------------
 st.set_page_config(page_title=" ", page_icon="🔄", layout="wide")
 
@@ -841,7 +622,6 @@ def load_css():
 
 load_css()
 
-# Logo SVG (no text)
 def show_logo():
     st.markdown("""
     <div class="logo-container">
@@ -871,7 +651,6 @@ if 'forex_volume' not in st.session_state:
     st.session_state.forex_volume = ForexEngine.get_volume()
 if 'use_real_forex' not in st.session_state:
     st.session_state.use_real_forex = True
-
 if 'forex_daily_hist' not in st.session_state:
     st.session_state.forex_daily_hist = ForexForecast.generate_daily_history(90)
 if 'crypto_live_prices' not in st.session_state:
@@ -891,15 +670,13 @@ if 'crypto_daily_hist' not in st.session_state:
 with st.sidebar:
     show_logo()
     st.write(f"👤 {st.session_state.username} ({st.session_state.role})")
-    mode_options = ["💱 Forex Pro", "🏗️ Structural Pro", "₿ Crypto Tracker", "💳 Mobile Wallet"]
+    mode_options = ["💱 Forex Pro", "🤖 Jup AI", "₿ Crypto Tracker", "💳 Mobile Wallet"]
     if 'mode' not in st.session_state:
         st.session_state.mode = mode_options[0]
     mode = st.radio("🧠 Engine", mode_options, index=mode_options.index(st.session_state.mode))
     st.session_state.mode = mode
-
     if mode == "💱 Forex Pro":
         st.checkbox("Real‑time forex", value=st.session_state.use_real_forex, key="use_real_forex")
-
     if st.session_state.role == "admin":
         with st.expander("👥 User Management"):
             with st.form("add_user_form"):
@@ -910,32 +687,18 @@ with st.sidebar:
                 if st.form_submit_button("Add User"):
                     if new_user and new_pass and new_email:
                         success, msg = add_user(new_user, new_pass, new_email, new_role)
-                        if success:
-                            st.success(msg)
-                        else:
-                            st.error(msg)
+                        st.success(msg) if success else st.error(msg)
                     else:
                         st.error("All fields required.")
-
-    with st.expander("🚀 Deploy to Streamlit Cloud"):
-        st.markdown("""
-        1. Push `streamlit_app.py` + `requirements.txt` to GitHub.
-        2. Set secrets: `email_sender`, `email_password`, `smtp_server`, `smtp_port`.
-        3. Go to [share.streamlit.io](https://share.streamlit.io) and connect your repo.
-        4. Set branch `main`, file path `streamlit_app.py`, deploy.
-        """)
-
+    with st.expander("🚀 Deploy"):
+        st.markdown("Push to GitHub, set secrets, deploy on Streamlit Cloud.")
     if st.button("🚪 Logout"):
         logout()
-    st.caption("v9.1 · AI Advisor & Withdrawal")
+    st.caption("v10 · Jup AI Trading Agent")
 
-# AI Market Advisor (replaces voice commands)
-ai_market_advisor()
-
-# -------------------- Modules rendering --------------------
+# -------------------- Modules --------------------
 if mode == "💱 Forex Pro":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    # ... (Forex Pro UI unchanged, ensure it works with new forecast)
     st.subheader("💹 Forex Pro: Live & Historical")
     forex_df = ForexEngine.get_live_data(use_real=st.session_state.use_real_forex)
     st.session_state.forex_data = forex_df
@@ -949,57 +712,16 @@ if mode == "💱 Forex Pro":
                 <span style="font-size:24px; color:{color};">{row['Last']}</span><br>
                 <span style="font-size:14px; color:{color};">{row['Change']} ({row['Change %']})</span>
             </div>""", unsafe_allow_html=True)
-    st.subheader("📈 Live Streams")
     st.line_chart(forex_df.set_index("Time"))
-    pair_hist = st.selectbox("🔍 Historical from DB", ForexEngine.PAIRS)
+    pair_hist = st.selectbox("DB History", ForexEngine.PAIRS)
     hist_df = ForexEngine.get_history(pair_hist, 30)
     if not hist_df.empty:
         st.line_chart(hist_df.set_index("timestamp"))
     else:
         st.info("No history yet.")
-    st.subheader("📊 Volume")
     st.bar_chart(st.session_state.forex_volume.set_index("Time"))
-    st.subheader("🔗 Correlation")
     st.table(ForexEngine.get_correlation_matrix(forex_df))
-    st.subheader("📅 Economic Calendar")
-    st.table(ForexEngine.generate_economic_calendar())
-
-    with st.expander("📡 AI Trading Signals (RSI & MACD)", expanded=False):
-        signal_pair = st.selectbox("Choose pair for signals", ForexEngine.PAIRS, key="signal_pair")
-        signals = TradingSignals.generate_signals(forex_df, signal_pair)
-        if signals:
-            for sig_type, reason in signals:
-                color = "green" if sig_type == "BUY" else "red"
-                st.markdown(f"<span style='color:{color}; font-weight:bold;'>{sig_type}</span> – {reason}", unsafe_allow_html=True)
-        else:
-            st.write("No strong signals at the moment.")
-        prices = forex_df[signal_pair].values
-        rsi = TradingSignals.compute_rsi(prices)
-        st.metric(f"RSI (14) for {signal_pair}", f"{rsi[-1]:.1f}")
-
-    st.subheader("🔮 Forex Forecasts (Daily, Weekly, Monthly)")
-    forecast_horizon = st.radio("Forecast period", ["1 Day", "7 Days (Week)", "30 Days (Month)"], horizontal=True)
-    horizon_map = {"1 Day": 1, "7 Days (Week)": 7, "30 Days (Month)": 30}
-    days = horizon_map[forecast_horizon]
-    daily_hist = st.session_state.forex_daily_hist
-    forecast_table = []
-    chart_data = {}
-    for pair in ForexEngine.PAIRS:
-        fcast = ForexForecast.forecast(daily_hist, days, pair)
-        forecast_table.append({"Pair": pair, "Latest": daily_hist[pair].iloc[-1],
-                               "Forecast": fcast[-1], "Change": round(fcast[-1] - daily_hist[pair].iloc[-1], 4)})
-        hist_part = daily_hist[pair].tail(30)
-        idx_hist = list(hist_part.index)
-        idx_fut = pd.date_range(idx_hist[-1] + pd.Timedelta(days=1), periods=days, freq='D')
-        combined = np.concatenate([hist_part.values, fcast])
-        chart_data[pair] = pd.Series(combined, index=list(idx_hist)+list(idx_fut))
-    fdf = pd.DataFrame(forecast_table)
-    st.dataframe(fdf.style.applymap(lambda x: 'color: #00ff88' if isinstance(x, (int,float)) and x>0 else 'color: #ff4b4b',
-                                    subset=['Change']), use_container_width=True)
-    pair_for_chart = st.selectbox("Select pair for forecast chart", ForexEngine.PAIRS, key="forex_fcast_chart")
-    if pair_for_chart in chart_data:
-        st.line_chart(chart_data[pair_for_chart])
-    if st.button("🔄 Refresh Live Data", key="forex_refresh"):
+    if st.button("🔄 Refresh Live Data"):
         st.session_state.forex_data = ForexEngine.get_live_data(use_real=st.session_state.use_real_forex)
         st.session_state.forex_volume = ForexEngine.get_volume()
         st.rerun()
@@ -1020,129 +742,19 @@ elif mode == "₿ Crypto Tracker":
                     <span style="color:{change_color};">{row['24h Change %']}%</span>
                 </div>""", unsafe_allow_html=True)
     else:
-        st.warning("Could not fetch live crypto prices.")
-    if st.button("🔄 Refresh Crypto", key="crypto_refresh"):
+        st.warning("Could not fetch prices.")
+    if st.button("🔄 Refresh Crypto"):
         st.session_state.crypto_live_prices = CryptoEngine.fetch_prices()
         st.rerun()
-    st.subheader("📈 Historical (7d)")
     coin_hist = st.selectbox("Select coin", CRYPTO_COINS, format_func=lambda x: CRYPTO_NAMES[x])
-    hist_crypto = CryptoEngine.get_historical(coin_hist, 7)
-    if hist_crypto is not None:
-        st.line_chart(hist_crypto)
-    st.subheader("🔮 Crypto Forecasts")
-    crypto_forecast_horizon = st.radio("Period", ["1 Day", "7 Days", "30 Days"], horizontal=True)
-    c_horizon = {"1 Day": 1, "7 Days": 7, "30 Days": 30}[crypto_forecast_horizon]
-    daily_crypto_hist = st.session_state.crypto_daily_hist
-    c_forecast_table = []
-    c_chart_data = {}
-    for coin in CRYPTO_COINS:
-        fcast = CryptoForecast.forecast(daily_crypto_hist, c_horizon, coin)
-        c_forecast_table.append({"Coin": CRYPTO_NAMES[coin], "Latest": daily_crypto_hist[coin].iloc[-1],
-                                 "Forecast": fcast[-1], "Change": round(fcast[-1] - daily_crypto_hist[coin].iloc[-1], 2)})
-        hist_part = daily_crypto_hist[coin].tail(30)
-        idx_hist = list(hist_part.index)
-        idx_fut = pd.date_range(idx_hist[-1] + pd.Timedelta(days=1), periods=c_horizon, freq='D')
-        combined = np.concatenate([hist_part.values, fcast])
-        c_chart_data[coin] = pd.Series(combined, index=list(idx_hist)+list(idx_fut))
-    c_fdf = pd.DataFrame(c_forecast_table)
-    st.dataframe(c_fdf.style.applymap(lambda x: 'color: #00ff88' if isinstance(x, (int,float)) and x>0 else 'color: #ff4b4b',
-                                      subset=['Change']), use_container_width=True)
-    crypto_chart_coin = st.selectbox("Coin for forecast chart", CRYPTO_COINS, format_func=lambda x: CRYPTO_NAMES[x], key="crypto_fcast_chart")
-    if crypto_chart_coin in c_chart_data:
-        st.line_chart(c_chart_data[crypto_chart_coin])
+    hist = CryptoEngine.get_historical(coin_hist, 7)
+    if hist is not None:
+        st.line_chart(hist)
     st.markdown('</div>', unsafe_allow_html=True)
 
-elif mode == "🏗️ Structural Pro":
+elif mode == "🤖 Jup AI":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    tab1, tab2 = st.tabs(["📐 Beam Analysis", "🏢 3D Building Designer"])
-    with tab1:
-        st.subheader("Beam Analysis")
-        col1, col2 = st.columns(2)
-        with col1:
-            beam_length = st.number_input("Beam length (m)", 1.0, 20.0, 5.0)
-            load_type = st.selectbox("Load type", ["Point (kN)", "Uniform (kN/m)"])
-            load_mag = st.number_input("Load magnitude", 0.1, 1000.0, 10.0)
-            supports = st.selectbox("Support condition", ["simple", "fixed"])
-        with col2:
-            material = st.selectbox("Material", ["Steel", "Concrete", "Timber"])
-            if st.button("Calculate"):
-                reactions = StructuralAnalysis.beam_load_distribution(beam_length, load_type, load_mag, supports)
-                st.write("**Reactions:**", reactions)
-                # simplified stress
-                if supports == "simple":
-                    M_max = (load_mag * beam_length) / 4 if load_type=="Point (kN)" else (load_mag * beam_length**2)/8
-                else:
-                    M_max = load_mag * beam_length if load_type=="Point (kN)" else (load_mag * beam_length**2)/2
-                st.metric("Max Moment (kNm)", f"{M_max:.2f}")
-                st.success("Analysis saved to database.")
-                conn = get_db_connection()
-                c = conn.cursor()
-                c.execute('''INSERT INTO structural_analyses
-                             (timestamp, beam_length, load_magnitude, load_type, material, moment, shear, stress_bending, stress_shear, deflection, status)
-                             VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 'done')''',
-                          (datetime.now().isoformat(), beam_length, load_mag, load_type, material, M_max))
-                conn.commit()
-    with tab2:
-        st.subheader("3D Building Designer")
-        # ... (unchanged 3D building UI)
-        elem_type = st.selectbox("Element type", list(StructuralModel.ELEMENT_TYPES.keys()))
-        subtype = st.selectbox("Subtype", StructuralModel.ELEMENT_TYPES[elem_type])
-        with st.form("add_element_form"):
-            if elem_type == "column":
-                x = st.number_input("X position", value=0.0)
-                z = st.number_input("Z position", value=0.0)
-                height = st.number_input("Height", value=3.0)
-                if subtype == "circular":
-                    radius = st.number_input("Radius", value=0.15)
-                    params = {"x": x, "z": z, "height": height, "radius": radius}
-                else:
-                    width = st.number_input("Width", value=0.3)
-                    depth = st.number_input("Depth", value=0.3)
-                    params = {"x": x, "z": z, "height": height, "width": width, "depth": depth}
-            elif elem_type == "beam":
-                x1 = st.number_input("Start X", value=0.0)
-                z1 = st.number_input("Start Z", value=0.0)
-                x2 = st.number_input("End X", value=4.0)
-                z2 = st.number_input("End Z", value=0.0)
-                y = st.number_input("Y level", value=3.0)
-                width = st.number_input("Width", value=0.2)
-                depth = st.number_input("Depth", value=0.3)
-                params = {"x1": x1, "z1": z1, "x2": x2, "z2": z2, "y": y, "width": width, "depth": depth}
-            elif elem_type == "slab":
-                x = st.number_input("X position", value=0.0)
-                z = st.number_input("Z position", value=0.0)
-                width = st.number_input("Width", value=4.0)
-                depth = st.number_input("Depth", value=4.0)
-                thickness = st.number_input("Thickness", value=0.15)
-                y = st.number_input("Y level", value=3.0)
-                params = {"x": x, "z": z, "width": width, "depth": depth, "thickness": thickness, "y": y}
-            elif elem_type == "wall":
-                x1 = st.number_input("Start X", value=0.0)
-                z1 = st.number_input("Start Z", value=0.0)
-                x2 = st.number_input("End X", value=4.0)
-                z2 = st.number_input("End Z", value=0.0)
-                height = st.number_input("Height", value=3.0)
-                thickness = st.number_input("Thickness", value=0.15)
-                params = {"x1": x1, "z1": z1, "x2": x2, "z2": z2, "height": height, "thickness": thickness}
-            else:  # opening
-                pos_x = st.number_input("Position X", value=0.0)
-                pos_z = st.number_input("Position Z", value=0.0)
-                width = st.number_input("Width", value=1.0)
-                height = st.number_input("Height", value=2.1)
-                params = {"pos_x": pos_x, "pos_z": pos_z, "width": width, "height": height}
-            if st.form_submit_button("Add Element"):
-                StructuralModel.add_element(st.session_state.username, elem_type, subtype, params)
-                st.success("Element added!")
-        elements_df = StructuralModel.get_elements(st.session_state.username)
-        if not elements_df.empty:
-            st.dataframe(elements_df[["id","type","subtype"]])
-            if st.button("Delete Selected Element"):
-                sel_id = st.number_input("Element ID to delete", min_value=1, step=1)
-                if sel_id:
-                    StructuralModel.delete_element(sel_id)
-                    st.rerun()
-            st.subheader("3D View")
-            st.components.v1.html(StructuralModel.generate_3d_scene(elements_df), height=600)
+    jup_ai_tab()
     st.markdown('</div>', unsafe_allow_html=True)
 
 elif mode == "💳 Mobile Wallet":
@@ -1151,44 +763,51 @@ elif mode == "💳 Mobile Wallet":
     balance = MobileWallet.get_balance(st.session_state.username)
     st.metric("Current Balance", f"{balance:,.2f} (simulated)")
 
-    tab_w1, tab_w2 = st.tabs(["💰 Deposit", "💸 Withdraw"])
-    with tab_w1:
+    tab1, tab2 = st.tabs(["💰 Deposit", "💸 Withdraw"])
+    with tab1:
         with st.form("deposit_form"):
             phone = st.text_input("Phone number")
             amount = st.number_input("Amount", min_value=1.0, step=10.0)
             provider = st.selectbox("Provider", MobileWallet.PROVIDERS)
-            if st.form_submit_button("Request Deposit"):
+            submitted = st.form_submit_button("Request Deposit")
+            if submitted:
                 ref = MobileWallet.deposit_request(st.session_state.username, phone, amount, provider)
-                st.success(f"Deposit request sent. Reference: {ref}")
-                st.info("To confirm, enter reference below:")
-                confirm_ref = st.text_input("Reference to confirm")
-                if confirm_ref and st.button("Confirm Deposit", key="confirm_dep"):
-                    if confirm_ref == ref:
-                        MobileWallet.confirm_deposit(ref)
-                        st.success("Deposit confirmed! Balance updated.")
-                        st.rerun()
-                    else:
-                        st.error("Invalid reference")
-    with tab_w2:
+                st.session_state.deposit_ref = ref
+                st.success(f"Deposit requested. Reference: {ref}")
+        # Confirm deposit outside form
+        if 'deposit_ref' in st.session_state:
+            confirm_ref = st.text_input("Enter reference to confirm", key="confirm_dep_ref")
+            if st.button("✅ Confirm Deposit"):
+                if confirm_ref == st.session_state.deposit_ref:
+                    MobileWallet.confirm_deposit(confirm_ref)
+                    st.success("Deposit confirmed!")
+                    del st.session_state.deposit_ref
+                    st.rerun()
+                else:
+                    st.error("Invalid reference")
+    with tab2:
         with st.form("withdraw_form"):
-            w_phone = st.text_input("Phone number", key="w_phone")
-            w_amount = st.number_input("Amount", min_value=1.0, step=10.0, key="w_amount")
-            w_provider = st.selectbox("Provider", MobileWallet.PROVIDERS, key="w_provider")
-            if st.form_submit_button("Request Withdrawal"):
-                ref, msg = MobileWallet.withdraw_request(st.session_state.username, w_phone, w_amount, w_provider)
+            phone = st.text_input("Phone number", key="w_phone")
+            amount = st.number_input("Amount", min_value=1.0, step=10.0, key="w_amount")
+            provider = st.selectbox("Provider", MobileWallet.PROVIDERS, key="w_provider")
+            submitted = st.form_submit_button("Request Withdrawal")
+            if submitted:
+                ref, msg = MobileWallet.withdraw_request(st.session_state.username, phone, amount, provider)
                 if ref is None:
                     st.error(msg)
                 else:
-                    st.success(f"Withdrawal request submitted. Reference: {ref}")
-                    st.info("Enter reference to confirm:")
-                    w_confirm_ref = st.text_input("Reference", key="w_confirm_ref")
-                    if w_confirm_ref and st.button("Confirm Withdrawal", key="confirm_wth"):
-                        if w_confirm_ref == ref:
-                            MobileWallet.confirm_withdrawal(ref)
-                            st.success("Withdrawal successful!")
-                            st.rerun()
-                        else:
-                            st.error("Invalid reference")
+                    st.session_state.withdraw_ref = ref
+                    st.success(f"Withdrawal requested. Reference: {ref}")
+        if 'withdraw_ref' in st.session_state:
+            confirm_ref = st.text_input("Enter reference to confirm", key="confirm_wth_ref")
+            if st.button("✅ Confirm Withdrawal"):
+                if confirm_ref == st.session_state.withdraw_ref:
+                    MobileWallet.confirm_withdrawal(confirm_ref)
+                    st.success("Withdrawal successful!")
+                    del st.session_state.withdraw_ref
+                    st.rerun()
+                else:
+                    st.error("Invalid reference")
 
     st.subheader("Transaction History")
     txn_df = MobileWallet.get_transactions(st.session_state.username)
