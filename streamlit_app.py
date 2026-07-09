@@ -148,6 +148,29 @@ def send_email_notification(to_email, subject, body):
 # ------------------------------------------------------------------
 # MOBILE MONEY WALLET
 # ------------------------------------------------------------------
+elif mode == "💳 Mobile Wallet":
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    st.subheader("💳 Mobile Wallet")
+    balance = MobileWallet.get_balance(st.session_state.username)
+    st.metric("Current Balance", f"${balance:,.2f}")
+
+    # Instant Top-Up (for testing / quick capital)
+    with st.expander("⚡ Instant Top‑Up (Simulated)"):
+        quick_amount = st.number_input("Amount to add", min_value=1.0, value=100.0, step=10.0)
+        if st.button("Add Funds Now"):
+            ref = f"TOPUP{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute('''INSERT INTO wallet_transactions
+                         (username, type, amount, phone, provider, reference, status, timestamp)
+                         VALUES (?, 'deposit', ?, 'instant', 'Simulated', ?, 'completed', ?)''',
+                      (st.session_state.username, quick_amount, ref, datetime.now().isoformat()))
+            conn.commit()
+            st.success(f"${quick_amount:,.2f} added to your balance!")
+            st.rerun()
+
+    tab1, tab2 = st.tabs(["💰 Deposit", "💸 Withdraw"])
+    # ... (rest of deposit/withdraw forms unchanged)
 class MobileWallet:
     PROVIDERS = ["M-Pesa (Kenya)", "Airtel Money (Uganda)", "MTN MoMo (Uganda)"]
 
