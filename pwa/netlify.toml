@@ -21,4 +21,4 @@
 [[headers]]
   for = "/*"
   [headers.values]
-    X-Frame-Options = "ALLOW-FROM https://your-streamlit-app.streamlit.app"
+    X-Frame-Options = https://jupitor.streamlit.app/#dashboard-overview
