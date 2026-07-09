@@ -85,45 +85,26 @@ def add_user(username, password, email, role="user"):
     except sqlite3.IntegrityError:
         return False, "Username already exists."
 
-def register_user():
-    st.markdown("<h2 style='text-align:center;'>📝 Register New Account</h2>", unsafe_allow_html=True)
-    with st.form("register_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        email = st.text_input("Email")
-        submitted = st.form_submit_button("Register")
-        if submitted:
-            if not username or not password or not email:
-                st.error("All fields are required.")
-            else:
-                success, msg = add_user(username, password, email)
-                if success:
-                    st.success(msg + " You can now login.")
-                else:
-                    st.error(msg)
+def update_user_email(username, new_email):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("UPDATE users SET email=? WHERE username=?", (new_email, username))
+    conn.commit()
+    return True
 
-def login():
-    st.markdown("<h1 style='text-align: center;'>🔐 Arc OS Pro Login</h1>", unsafe_allow_html=True)
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        with st.form("login_form"):
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Login")
-            if submitted:
-                success, role = authenticate(username, password)
-                if success:
-                    st.session_state.authenticated = True
-                    st.session_state.username = username
-                    st.session_state.role = role
-                    st.rerun()
-                else:
-                    st.error("Invalid username or password")
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        if st.button("Register a new account"):
-            st.session_state.show_registration = True
-            st.rerun()
+def delete_user(username):
+    if username == "admin":
+        return False, "Cannot delete admin account."
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM users WHERE username=?", (username,))
+    conn.commit()
+    return True, f"User '{username}' deleted."
+
+def get_all_users():
+    conn = get_db_connection()
+    df = pd.read_sql_query("SELECT username, role, email FROM users", conn)
+    return df
 
 # ------------------------------------------------------------------
 # EMAIL SENDING
@@ -149,30 +130,7 @@ def send_email_notification(to_email, subject, body):
         return False
 
 # ------------------------------------------------------------------
-# SESSION STATE INIT
-# ------------------------------------------------------------------
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-if "show_registration" not in st.session_state:
-    st.session_state.show_registration = False
-
-if not st.session_state.authenticated:
-    if st.session_state.show_registration:
-        register_user()
-        if st.button("Back to Login"):
-            st.session_state.show_registration = False
-            st.rerun()
-    else:
-        login()
-    st.stop()
-
-def logout():
-    for key in list(st.session_state.keys()):
-        del st.session_state[key]
-    st.rerun()
-
-# ------------------------------------------------------------------
-# MOBILE MONEY WALLET (fixed errors)
+# MOBILE MONEY WALLET
 # ------------------------------------------------------------------
 class MobileWallet:
     PROVIDERS = ["M-Pesa (Kenya)", "Airtel Money (Uganda)", "MTN MoMo (Uganda)"]
@@ -237,7 +195,7 @@ class MobileWallet:
         return df
 
 # ------------------------------------------------------------------
-# FOREX ENGINE (unchanged)
+# FOREX ENGINE
 # ------------------------------------------------------------------
 class ForexEngine:
     PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "UGX/USD", "KES/USD", "SSP/USD"]
@@ -346,7 +304,7 @@ class ForexEngine:
         return pd.DataFrame({"Time": times, "Volume": volume})
 
 # ------------------------------------------------------------------
-# TRADING SIGNALS (RSI + MACD) – used by Jup AI
+# TRADING SIGNALS (RSI + MACD)
 # ------------------------------------------------------------------
 class TradingSignals:
     @staticmethod
@@ -406,7 +364,7 @@ class TradingSignals:
         return signals
 
 # ------------------------------------------------------------------
-# IMPROVED FORECAST (weighted linear)
+# IMPROVED FORECAST
 # ------------------------------------------------------------------
 def weighted_linear_fit(x, y, tau=7):
     n = len(x)
@@ -483,7 +441,7 @@ class CryptoForecast:
         return np.round(coeffs[0] + coeffs[1] * future_x, 2)
 
 # ------------------------------------------------------------------
-# CRYPTO ENGINE (unchanged)
+# CRYPTO ENGINE
 # ------------------------------------------------------------------
 class CryptoEngine:
     @staticmethod
@@ -522,13 +480,11 @@ class CryptoEngine:
             return None
 
 # ------------------------------------------------------------------
-# JUP AI – TRADING NEWS AGENT (replaces Structural Pro)
+# JUP AI – TRADING NEWS AGENT
 # ------------------------------------------------------------------
 def jup_ai_tab():
     st.subheader("🤖 Jup AI · Trading Intelligence")
     st.caption("Parametric news agent – BUY, HOLD, SELL with trade time frames.")
-    # Simulated news headlines
-    st.markdown("**📰 Market News (simulated)**")
     news = [
         "Fed signals possible rate cut in next meeting.",
         "Oil prices surge on supply disruption fears.",
@@ -539,13 +495,11 @@ def jup_ai_tab():
     for item in news:
         st.info(item)
 
-    # Choose market
     market = st.radio("Market", ["Forex", "Crypto"], horizontal=True)
     if market == "Forex":
         pair = st.selectbox("Select currency pair", ForexEngine.PAIRS)
         df = st.session_state.forex_data
         signals = TradingSignals.generate_signals(df, pair)
-        # Trade decision logic
         buy_signals = sum(1 for s in signals if s[0]=="BUY")
         sell_signals = sum(1 for s in signals if s[0]=="SELL")
         if buy_signals > sell_signals:
@@ -555,13 +509,10 @@ def jup_ai_tab():
         else:
             decision = "HOLD"
         st.markdown(f"### Decision: **{decision}**")
-        st.caption("Based on RSI & MACD crossovers.")
-        # Trade time suggestion
         time_frame = "Scalp (mins)" if abs(df[pair].pct_change().iloc[-1])>0.002 else "Swing (days)"
         st.metric("Suggested Trade Time", time_frame)
-        # Forecast chart
-        st.subheader("📈 Forecast (Daily, Weekly, Monthly)")
-        horizon = st.selectbox("Forecast horizon", ["1 Day", "7 Days (Week)", "30 Days (Month)"])
+        st.subheader("📈 Forecast")
+        horizon = st.selectbox("Horizon", ["1 Day", "7 Days (Week)", "30 Days (Month)"])
         days = {"1 Day":1, "7 Days (Week)":7, "30 Days (Month)":30}[horizon]
         daily_hist = st.session_state.forex_daily_hist
         fcast = ForexForecast.forecast(daily_hist, days, pair)
@@ -573,7 +524,6 @@ def jup_ai_tab():
         st.line_chart(chart)
     else:
         coin = st.selectbox("Select coin", CRYPTO_COINS, format_func=lambda x: CRYPTO_NAMES[x])
-        # Simple sentiment from 24h change
         live = st.session_state.crypto_live_prices
         if live is not None:
             row = live[live['Coin']==CRYPTO_NAMES[coin]]
@@ -586,11 +536,10 @@ def jup_ai_tab():
                 else:
                     decision = "HOLD"
                 st.markdown(f"### Decision: **{decision}**")
-                st.caption("Based on 24h momentum.")
                 time_frame = "Scalp (minutes)" if abs(change)>5 else "Swing (days)"
                 st.metric("Suggested Trade Time", time_frame)
         daily_hist = st.session_state.crypto_daily_hist
-        horizon = st.selectbox("Forecast horizon", ["1 Day", "7 Days (Week)", "30 Days (Month)"])
+        horizon = st.selectbox("Horizon", ["1 Day", "7 Days (Week)", "30 Days (Month)"])
         days = {"1 Day":1, "7 Days (Week)":7, "30 Days (Month)":30}[horizon]
         fcast = CryptoForecast.forecast(daily_hist, days, coin)
         hist_part = daily_hist[coin].tail(30)
@@ -601,27 +550,16 @@ def jup_ai_tab():
         st.line_chart(chart)
 
 # ------------------------------------------------------------------
-# UI & SESSION STATE
+# SESSION STATE INIT
 # ------------------------------------------------------------------
-st.set_page_config(page_title=" ", page_icon="🔄", layout="wide")
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+if "show_registration" not in st.session_state:
+    st.session_state.show_registration = False
 
-def load_css():
-    st.markdown("""
-    <style>
-        .stApp { background: linear-gradient(135deg, #0a0a1a, #1a1a3a, #2a2a4a); color: #e0e0e0; }
-        section[data-testid="stSidebar"] { background: rgba(20,20,40,0.85); backdrop-filter: blur(12px); border-right: 1px solid rgba(255,255,255,0.1); }
-        h1,h2,h3 { font-family: 'Segoe UI', sans-serif; font-weight: 600; background: linear-gradient(90deg, #00d2ff, #3a7bd5); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
-        .glass-card { background: rgba(255,255,255,0.03); backdrop-filter: blur(16px); border-radius:18px; border:1px solid rgba(255,255,255,0.08); padding:24px; margin:12px 0; box-shadow:0 12px 40px rgba(0,0,0,0.5); }
-        .metric-box { background: rgba(255,255,255,0.06); border-radius:14px; padding:18px; margin:6px 0; text-align:center; font-weight:bold; border:1px solid rgba(255,255,255,0.12); transition: all 0.2s ease; }
-        .metric-box:hover { background: rgba(255,255,255,0.1); }
-        div.stButton > button { background: linear-gradient(45deg, #ff416c, #ff4b2b); border:none; color:white; padding:12px 28px; font-size:16px; font-weight:bold; border-radius:50px; box-shadow:0 0 20px rgba(255,75,43,0.5); transition:all 0.3s ease; cursor:pointer; letter-spacing:0.5px; text-transform:uppercase; width:100%; border:1px solid rgba(255,255,255,0.2); }
-        div.stButton > button:hover { transform:translateY(-2px); box-shadow:0 0 30px rgba(255,75,43,0.8); background:linear-gradient(45deg, #ff4b2b, #ff416c); color:white; }
-        .stForm button { background: linear-gradient(45deg, #00b4db, #0083b0) !important; }
-        .logo-container { display: flex; justify-content: center; margin: 10px 0 20px 0; }
-    </style>""", unsafe_allow_html=True)
-
-load_css()
-
+# ------------------------------------------------------------------
+# LOGO (no text)
+# ------------------------------------------------------------------
 def show_logo():
     st.markdown("""
     <div class="logo-container">
@@ -638,6 +576,85 @@ def show_logo():
     </div>
     """, unsafe_allow_html=True)
 
+# ------------------------------------------------------------------
+# AUTHENTICATION PAGES
+# ------------------------------------------------------------------
+def login():
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        show_logo()
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Login")
+            if submitted:
+                success, role = authenticate(username, password)
+                if success:
+                    st.session_state.authenticated = True
+                    st.session_state.username = username
+                    st.session_state.role = role
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password")
+        if st.button("Create an account"):
+            st.session_state.show_registration = True
+            st.rerun()
+
+def register_user():
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        show_logo()
+        with st.form("register_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            email = st.text_input("Email")
+            submitted = st.form_submit_button("Register")
+            if submitted:
+                if not username or not password or not email:
+                    st.error("All fields are required.")
+                else:
+                    success, msg = add_user(username, password, email)
+                    if success:
+                        st.success(msg + " You can now login.")
+                    else:
+                        st.error(msg)
+        if st.button("Back to Login"):
+            st.session_state.show_registration = False
+            st.rerun()
+
+if not st.session_state.authenticated:
+    if st.session_state.show_registration:
+        register_user()
+    else:
+        login()
+    st.stop()
+
+def logout():
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
+
+# ------------------------------------------------------------------
+# SIDEBAR & MODE SELECTION
+# ------------------------------------------------------------------
+st.set_page_config(page_title="Arc OS", page_icon="🔄", layout="wide")
+
+# CSS
+st.markdown("""
+<style>
+    .stApp { background: linear-gradient(135deg, #0a0a1a, #1a1a3a, #2a2a4a); color: #e0e0e0; }
+    section[data-testid="stSidebar"] { background: rgba(20,20,40,0.85); backdrop-filter: blur(12px); border-right: 1px solid rgba(255,255,255,0.1); }
+    h1,h2,h3 { font-family: 'Segoe UI', sans-serif; font-weight: 600; background: linear-gradient(90deg, #00d2ff, #3a7bd5); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
+    .glass-card { background: rgba(255,255,255,0.03); backdrop-filter: blur(16px); border-radius:18px; border:1px solid rgba(255,255,255,0.08); padding:24px; margin:12px 0; box-shadow:0 12px 40px rgba(0,0,0,0.5); }
+    .metric-box { background: rgba(255,255,255,0.06); border-radius:14px; padding:18px; margin:6px 0; text-align:center; font-weight:bold; border:1px solid rgba(255,255,255,0.12); transition: all 0.2s ease; }
+    .metric-box:hover { background: rgba(255,255,255,0.1); }
+    div.stButton > button { background: linear-gradient(45deg, #ff416c, #ff4b2b); border:none; color:white; padding:12px 28px; font-size:16px; font-weight:bold; border-radius:50px; box-shadow:0 0 20px rgba(255,75,43,0.5); transition:all 0.3s ease; cursor:pointer; letter-spacing:0.5px; text-transform:uppercase; width:100%; border:1px solid rgba(255,255,255,0.2); }
+    div.stButton > button:hover { transform:translateY(-2px); box-shadow:0 0 30px rgba(255,75,43,0.8); background:linear-gradient(45deg, #ff4b2b, #ff416c); color:white; }
+    .stForm button { background: linear-gradient(45deg, #00b4db, #0083b0) !important; }
+    .logo-container { display: flex; justify-content: center; margin: 10px 0 20px 0; }
+</style>""", unsafe_allow_html=True)
+
+# Initialize data (same as before)
 if 'role' not in st.session_state:
     conn = get_db_connection()
     c = conn.cursor()
@@ -664,22 +681,34 @@ if 'crypto_daily_hist' not in st.session_state:
                     live_dict[cid] = row["Price (USD)"]
     st.session_state.crypto_daily_hist = CryptoForecast.generate_daily_history(90, live_dict)
 
-# ------------------------------------------------------------------
-# SIDEBAR & MODE SELECTION
-# ------------------------------------------------------------------
+# Sidebar
 with st.sidebar:
     show_logo()
     st.write(f"👤 {st.session_state.username} ({st.session_state.role})")
-    mode_options = ["💱 Forex Pro", "🤖 Jup AI", "₿ Crypto Tracker", "💳 Mobile Wallet"]
+    mode_options = ["📊 Dashboard", "💱 Forex Pro", "🤖 Jup AI", "₿ Crypto Tracker", "💳 Mobile Wallet"]
     if 'mode' not in st.session_state:
         st.session_state.mode = mode_options[0]
     mode = st.radio("🧠 Engine", mode_options, index=mode_options.index(st.session_state.mode))
     st.session_state.mode = mode
+
     if mode == "💱 Forex Pro":
         st.checkbox("Real‑time forex", value=st.session_state.use_real_forex, key="use_real_forex")
+
+    # Settings (email update)
+    with st.expander("⚙️ Account Settings"):
+        new_email = st.text_input("New email", value="")
+        if st.button("Update Email"):
+            if new_email:
+                update_user_email(st.session_state.username, new_email)
+                st.success("Email updated.")
+            else:
+                st.error("Please enter an email.")
+
+    # Admin user management
     if st.session_state.role == "admin":
         with st.expander("👥 User Management"):
-            with st.form("add_user_form"):
+            st.subheader("Add User")
+            with st.form("admin_add_user"):
                 new_user = st.text_input("Username")
                 new_pass = st.text_input("Password", type="password")
                 new_email = st.text_input("Email")
@@ -687,17 +716,66 @@ with st.sidebar:
                 if st.form_submit_button("Add User"):
                     if new_user and new_pass and new_email:
                         success, msg = add_user(new_user, new_pass, new_email, new_role)
-                        st.success(msg) if success else st.error(msg)
+                        if success:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
                     else:
                         st.error("All fields required.")
-    with st.expander("🚀 Deploy"):
-        st.markdown("Push to GitHub, set secrets, deploy on Streamlit Cloud.")
+            st.subheader("Existing Users")
+            users_df = get_all_users()
+            for idx, row in users_df.iterrows():
+                col1, col2, col3 = st.columns([3,2,1])
+                with col1:
+                    st.write(f"**{row['username']}** ({row['role']})")
+                with col2:
+                    st.write(row['email'])
+                with col3:
+                    if row['username'] != 'admin':
+                        if st.button("🗑️", key=f"del_{row['username']}"):
+                            d_success, d_msg = delete_user(row['username'])
+                            if d_success:
+                                st.success(d_msg)
+                            else:
+                                st.error(d_msg)
+                            st.rerun()
+
     if st.button("🚪 Logout"):
         logout()
     st.caption("v10 · Jup AI Trading Agent")
 
-# -------------------- Modules --------------------
-if mode == "💱 Forex Pro":
+# ------------------------------------------------------------------
+# DASHBOARD TAB
+# ------------------------------------------------------------------
+if mode == "📊 Dashboard":
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    st.subheader("Dashboard Overview")
+    # Wallet balance
+    balance = MobileWallet.get_balance(st.session_state.username)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Wallet Balance", f"${balance:,.2f}")
+    with col2:
+        forex_df = st.session_state.forex_data
+        top_mover = ForexEngine.get_summary(forex_df).sort_values("Change %", key=lambda x: x.str.rstrip('%').astype(float), ascending=False).iloc[0]
+        st.metric("Top Forex Mover", top_mover["Pair"], f"{top_mover['Change %']}%")
+    with col3:
+        crypto_df = st.session_state.crypto_live_prices
+        if crypto_df is not None:
+            best = crypto_df.loc[crypto_df['24h Change %'].idxmax()]
+            st.metric("Top Crypto", best['Coin'], f"{best['24h Change %']}%")
+    st.markdown("---")
+    st.subheader("Market Snapshot")
+    # Small forex chart
+    st.line_chart(forex_df.set_index("Time")[["EUR/USD", "GBP/USD"]])
+    if crypto_df is not None:
+        st.dataframe(crypto_df, hide_index=True, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ------------------------------------------------------------------
+# OTHER TABS (Forex, Jup AI, Crypto, Wallet)
+# ------------------------------------------------------------------
+elif mode == "💱 Forex Pro":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.subheader("💹 Forex Pro: Live & Historical")
     forex_df = ForexEngine.get_live_data(use_real=st.session_state.use_real_forex)
@@ -761,7 +839,7 @@ elif mode == "💳 Mobile Wallet":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.subheader("💳 Mobile Wallet")
     balance = MobileWallet.get_balance(st.session_state.username)
-    st.metric("Current Balance", f"{balance:,.2f} (simulated)")
+    st.metric("Current Balance", f"${balance:,.2f}")
 
     tab1, tab2 = st.tabs(["💰 Deposit", "💸 Withdraw"])
     with tab1:
@@ -774,7 +852,6 @@ elif mode == "💳 Mobile Wallet":
                 ref = MobileWallet.deposit_request(st.session_state.username, phone, amount, provider)
                 st.session_state.deposit_ref = ref
                 st.success(f"Deposit requested. Reference: {ref}")
-        # Confirm deposit outside form
         if 'deposit_ref' in st.session_state:
             confirm_ref = st.text_input("Enter reference to confirm", key="confirm_dep_ref")
             if st.button("✅ Confirm Deposit"):
@@ -812,7 +889,12 @@ elif mode == "💳 Mobile Wallet":
     st.subheader("Transaction History")
     txn_df = MobileWallet.get_transactions(st.session_state.username)
     if not txn_df.empty:
-        st.dataframe(txn_df)
+        # Color status
+        def color_status(val):
+            color = 'green' if val == 'completed' else 'orange' if val == 'pending' else 'red'
+            return f'color: {color}'
+        styled = txn_df.style.applymap(color_status, subset=['status'])
+        st.dataframe(styled, use_container_width=True)
     else:
         st.info("No transactions yet.")
     st.markdown('</div>', unsafe_allow_html=True)
