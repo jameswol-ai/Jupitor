@@ -148,7 +148,7 @@ def send_email_notification(to_email, subject, body):
 # ------------------------------------------------------------------
 # MOBILE MONEY WALLET
 # ------------------------------------------------------------------
-elif mode == "💳 Mobile Wallet":
+#elif mode == "💳 Mobile Wallet":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.subheader("💳 Mobile Wallet")
     balance = MobileWallet.get_balance(st.session_state.username)
