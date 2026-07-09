@@ -8,19 +8,29 @@ import hashlib
 import json
 import smtplib
 from email.message import EmailMessage
-import plotly.graph_objects as go
-from streamlit_autorefresh import st_autorefresh
-import feedparser
 import base64
-import os
+
+# Optional imports – app runs without them, just skip features
+try:
+    from streamlit_autorefresh import st_autorefresh
+    AUTO_REFRESH = True
+except ImportError:
+    AUTO_REFRESH = False
+
+try:
+    import feedparser
+    RSS_AVAILABLE = True
+except ImportError:
+    RSS_AVAILABLE = False
 
 # ------------------------------------------------------------------
 # MUST BE FIRST STREAMLIT COMMAND
 # ------------------------------------------------------------------
 st.set_page_config(page_title="Arc OS", page_icon="🔄", layout="wide")
 
-# AUTO REFRESH EVERY 30 SECONDS (simulate real‑time)
-st_autorefresh(interval=30000, key="datarefresh")
+# Auto-refresh every 30 seconds (if module installed)
+if AUTO_REFRESH:
+    st_autorefresh(interval=30000, key="datarefresh")
 
 # ------------------------------------------------------------------
 # GLOBAL CONSTANTS
@@ -28,7 +38,6 @@ st_autorefresh(interval=30000, key="datarefresh")
 CRYPTO_COINS = ["bitcoin", "ethereum", "ripple", "cardano", "solana"]
 CRYPTO_NAMES = {"bitcoin": "BTC", "ethereum": "ETH", "ripple": "XRP",
                 "cardano": "ADA", "solana": "SOL"}
-THEME = st.session_state.get("theme", "dark")
 
 # ------------------------------------------------------------------
 # DATABASE SETUP
@@ -85,7 +94,7 @@ def get_db_connection():
 init_db()
 
 # ------------------------------------------------------------------
-# AUTHENTICATION & 2FA (simulated)
+# AUTHENTICATION & 2FA
 # ------------------------------------------------------------------
 FALLBACK_USERS = {
     "demo": (hashlib.sha256("demo".encode()).hexdigest(), "user")
@@ -108,7 +117,6 @@ def authenticate(username, password):
 
 def send_otp(email):
     otp = str(np.random.randint(100000, 999999))
-    # store OTP in session state
     st.session_state.otp = otp
     send_email_notification(email, "Arc OS OTP", f"Your one‑time password is: {otp}")
     return otp
@@ -144,8 +152,7 @@ def delete_user(username):
 
 def get_all_users():
     conn = get_db_connection()
-    df = pd.read_sql_query("SELECT username, role, email FROM users", conn)
-    return df
+    return pd.read_sql_query("SELECT username, role, email FROM users", conn)
 
 # ------------------------------------------------------------------
 # EMAIL
@@ -171,7 +178,7 @@ def send_email_notification(to_email, subject, body):
         return False
 
 # ------------------------------------------------------------------
-# MOBILE WALLET + TOP‑UP
+# MOBILE WALLET
 # ------------------------------------------------------------------
 class MobileWallet:
     PROVIDERS = ["M-Pesa (Kenya)", "Airtel Money (Uganda)", "MTN MoMo (Uganda)"]
@@ -230,13 +237,12 @@ class MobileWallet:
     @staticmethod
     def get_transactions(username, limit=20):
         conn = get_db_connection()
-        df = pd.read_sql_query(
+        return pd.read_sql_query(
             "SELECT * FROM wallet_transactions WHERE username=? ORDER BY timestamp DESC LIMIT ?",
             conn, params=(username, limit))
-        return df
 
 # ------------------------------------------------------------------
-# FOREX ENGINE (unchanged)
+# FOREX ENGINE
 # ------------------------------------------------------------------
 class ForexEngine:
     PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "UGX/USD", "KES/USD", "SSP/USD"]
@@ -345,7 +351,7 @@ class ForexEngine:
         return pd.DataFrame({"Time": times, "Volume": volume})
 
 # ------------------------------------------------------------------
-# TECHNICAL INDICATORS (Bollinger, SMA, etc.)
+# TECHNICAL INDICATORS (RSI, MACD, Bollinger)
 # ------------------------------------------------------------------
 class TradingSignals:
     @staticmethod
@@ -418,7 +424,7 @@ class TradingSignals:
         return signals
 
 # ------------------------------------------------------------------
-# FORECAST
+# FORECAST (weighted linear)
 # ------------------------------------------------------------------
 def weighted_linear_fit(x, y, tau=7):
     n = len(x)
@@ -554,8 +560,7 @@ class TradingModule:
     @staticmethod
     def get_open_positions(username):
         conn = get_db_connection()
-        df = pd.read_sql_query("SELECT * FROM trades WHERE username=? AND status='open'", conn, params=(username,))
-        return df
+        return pd.read_sql_query("SELECT * FROM trades WHERE username=? AND status='open'", conn, params=(username,))
 
     @staticmethod
     def close_trade(trade_id, close_price):
@@ -569,10 +574,7 @@ class TradingModule:
          stop_loss, take_profit, ts, status, _, _, _) = trade
         if status != 'open':
             return False, "Trade already closed."
-        if trade_type == 'buy':
-            pnl = (close_price - open_price) * amount * leverage
-        else:
-            pnl = (open_price - close_price) * amount * leverage
+        pnl = (close_price - open_price) * amount * leverage if trade_type == 'buy' else (open_price - close_price) * amount * leverage
         close_ts = datetime.now().isoformat()
         c.execute("UPDATE trades SET status='closed', close_price=?, close_timestamp=?, pnl=? WHERE id=?",
                   (close_price, close_ts, round(pnl, 4), trade_id))
@@ -610,9 +612,8 @@ class TradingModule:
     @staticmethod
     def get_trade_history(username, limit=30):
         conn = get_db_connection()
-        df = pd.read_sql_query("SELECT * FROM trades WHERE username=? ORDER BY timestamp DESC LIMIT ?",
-                               conn, params=(username, limit))
-        return df
+        return pd.read_sql_query("SELECT * FROM trades WHERE username=? ORDER BY timestamp DESC LIMIT ?",
+                                 conn, params=(username, limit))
 
 # ------------------------------------------------------------------
 # PRICE ALERTS
@@ -636,7 +637,6 @@ def check_price_alerts(username):
         if current is not None:
             if direction == 'above' and current >= price_target:
                 st.toast(f"🚨 {symbol} is now above {price_target}!")
-                # remove alert after firing
                 c = conn.cursor()
                 c.execute("DELETE FROM alerts WHERE username=? AND symbol=? AND price=? AND direction=?",
                           (username, symbol, price_target, direction))
@@ -649,7 +649,7 @@ def check_price_alerts(username):
                 conn.commit()
 
 # ------------------------------------------------------------------
-# BACKTESTING (simple)
+# BACKTESTING (simple RSI strategy)
 # ------------------------------------------------------------------
 def backtest_rsi_strategy(prices, rsi_period=14, oversold=30, overbought=70):
     rsi = TradingSignals.compute_rsi(prices, rsi_period)
@@ -670,6 +670,8 @@ def backtest_rsi_strategy(prices, rsi_period=14, oversold=30, overbought=70):
 # SENTIMENT ANALYSIS (RSS)
 # ------------------------------------------------------------------
 def fetch_market_sentiment():
+    if not RSS_AVAILABLE:
+        return np.random.randint(-3, 4)  # fallback random
     sentiment_score = 0
     try:
         feed = feedparser.parse("https://www.investing.com/rss/news_25.rss")
@@ -679,7 +681,6 @@ def fetch_market_sentiment():
             elif "bear" in entry.title.lower() or "drop" in entry.title.lower():
                 sentiment_score -= 1
     except:
-        # fallback random sentiment
         sentiment_score = np.random.randint(-3, 4)
     return sentiment_score
 
@@ -691,10 +692,9 @@ if "authenticated" not in st.session_state:
 if "show_registration" not in st.session_state:
     st.session_state.show_registration = False
 
-# Logo
 def show_logo():
     st.markdown("""
-    <div class="logo-container">
+    <div style="display:flex; justify-content:center;">
         <svg width="90" height="90" viewBox="0 0 100 100">
             <defs>
                 <linearGradient id="arcGrad" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -717,13 +717,13 @@ def login():
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
             if use_2fa:
-                otp = st.text_input("OTP (sent to your email)")
+                otp_input = st.text_input("OTP (sent to your email)")
             submitted = st.form_submit_button("Login")
             if submitted:
                 success, role = authenticate(username, password)
                 if success:
                     if use_2fa:
-                        if 'otp' not in st.session_state or otp != st.session_state.otp:
+                        if 'otp' not in st.session_state or otp_input != st.session_state.otp:
                             st.error("Invalid OTP")
                             st.stop()
                     st.session_state.authenticated = True
@@ -773,7 +773,7 @@ def logout():
 # ------------------------------------------------------------------
 # UI THEME TOGGLE
 # ------------------------------------------------------------------
-theme = st.radio("🎨 Theme", ["dark", "light"], horizontal=True, index=0 if st.session_state.get("theme","dark")=="dark" else 1, key="theme_toggle")
+theme = st.sidebar.radio("🎨 Theme", ["dark", "light"], horizontal=True, index=0 if st.session_state.get("theme","dark")=="dark" else 1)
 st.session_state.theme = theme
 
 if theme == "light":
@@ -796,7 +796,7 @@ st.markdown(f"""
 </style>""", unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
-# DATA INIT
+# DATA INIT (session state)
 # ------------------------------------------------------------------
 if 'role' not in st.session_state:
     conn = get_db_connection()
@@ -883,7 +883,7 @@ with st.sidebar:
                             st.rerun()
     if st.button("🚪 Logout"):
         logout()
-    st.caption("v12 · PWA & Trading")
+    st.caption("v12 · PWA Ready")
 
 # ------------------------------------------------------------------
 # DASHBOARD
@@ -1008,12 +1008,10 @@ elif mode == "🤖 Jup AI":
         else:
             decision = "HOLD"
         st.markdown(f"### Decision: **{decision}**")
-        # Backtest
+        # Backtest chart
         prices = df[pair].values
         equity = backtest_rsi_strategy(prices)
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(y=equity, mode='lines', name='Equity'))
-        st.plotly_chart(fig, use_container_width=True)
+        st.line_chart(pd.DataFrame({"Equity": equity}))
     else:
         coin = st.selectbox("Select coin", CRYPTO_COINS, format_func=lambda x: CRYPTO_NAMES[x])
         live = st.session_state.crypto_live_prices
@@ -1220,12 +1218,19 @@ elif mode == "💳 Mobile Wallet":
 # ------------------------------------------------------------------
 if st.button("🏆 Leaderboard"):
     conn = get_db_connection()
-    balances = []
     users = get_all_users()
-    for _, row in users.iterrows():
-        bal = MobileWallet.get_balance(row['username'])
-        balances.append((row['username'], bal))
+    balances = [(row['username'], MobileWallet.get_balance(row['username'])) for _, row in users.iterrows()]
     balances.sort(key=lambda x: x[1], reverse=True)
     st.subheader("Top Traders")
     for i, (user, bal) in enumerate(balances[:10]):
         st.write(f"{i+1}. {user}: ${bal:,.2f}")
+
+# ------------------------------------------------------------------
+# PWA INSTRUCTIONS (for deployment)
+# ------------------------------------------------------------------
+st.markdown("""
+---
+**📲 Install as App (PWA):**  
+To make this app installable on your phone, create a `manifest.json` and `service-worker.js` and host them on a static site that embeds this Streamlit app in an iframe.  
+See [Streamlit PWA Guide](https://blog.streamlit.io/how-to-make-a-pwa-with-streamlit/) for details.
+""")
