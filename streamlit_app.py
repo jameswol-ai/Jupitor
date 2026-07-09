@@ -196,13 +196,13 @@ class MobileWallet:
     def get_balance(username):
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT SUM(CASE WHEN type='deposit' THEN amount ELSE -amount END) FROM wallet_transactions WHERE username=? AND status='completed'", (username,))
+        c.execute("SELECT SUM(CASE WHEN type='deposit' THEN amount WHEN type='withdrawal' THEN -amount ELSE 0 END) FROM wallet_transactions WHERE username=? AND status='completed'", (username,))
         row = c.fetchone()
         return row[0] if row[0] is not None else 0.0
 
     @staticmethod
     def deposit_request(username, phone, amount, provider):
-        ref = f"ARC{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        ref = f"DEP{datetime.now().strftime('%Y%m%d%H%M%S')}"
         conn = get_db_connection()
         c = conn.cursor()
         c.execute('''INSERT INTO wallet_transactions
@@ -214,6 +214,30 @@ class MobileWallet:
 
     @staticmethod
     def confirm_deposit(reference):
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("UPDATE wallet_transactions SET status='completed' WHERE reference=?", (reference,))
+        conn.commit()
+        return True
+
+    @staticmethod
+    def withdraw_request(username, phone, amount, provider):
+        # Check balance first
+        balance = MobileWallet.get_balance(username)
+        if amount > balance:
+            return None, "Insufficient balance."
+        ref = f"WTH{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('''INSERT INTO wallet_transactions
+                     (username, type, amount, phone, provider, reference, status, timestamp)
+                     VALUES (?, 'withdrawal', ?, ?, ?, ?, 'pending', ?)''',
+                  (username, amount, phone, provider, ref, datetime.now().isoformat()))
+        conn.commit()
+        return ref, "Withdrawal request submitted."
+
+    @staticmethod
+    def confirm_withdrawal(reference):
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("UPDATE wallet_transactions SET status='completed' WHERE reference=?", (reference,))
@@ -410,8 +434,57 @@ class TradingSignals:
         return signals
 
 # ------------------------------------------------------------------
-# FOREX & CRYPTO FORECAST ENGINE (Daily, Weekly, Monthly)
+# AI MARKET ADVISOR
 # ------------------------------------------------------------------
+def ai_market_advisor():
+    with st.expander("🧠 AI Market Advisor – What’s moving & what to trade", expanded=False):
+        st.markdown("### Market Health Snapshot")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.session_state.mode.startswith("💱"):
+                forex_df = st.session_state.forex_data
+                summary = ForexEngine.get_summary(forex_df)
+                signals_found = []
+                for pair in ForexEngine.PAIRS:
+                    sigs = TradingSignals.generate_signals(forex_df, pair)
+                    for sig_type, reason in sigs:
+                        signals_found.append(f"{sig_type} {pair}: {reason}")
+                if signals_found:
+                    st.success("Active Forex signals:\n" + "\n".join(signals_found))
+                else:
+                    st.info("No strong forex signals at the moment. Wait for clearer RSI/MACD crossovers.")
+                # List top movers
+                top_movers = summary.sort_values("Change %", key=lambda x: x.str.rstrip('%').astype(float), ascending=False)
+                st.write("**Top movers (24h):**")
+                st.dataframe(top_movers[["Pair","Last","Change %"]].head(3), hide_index=True)
+        with col2:
+            if st.session_state.mode.startswith("₿"):
+                crypto_df = st.session_state.crypto_live_prices
+                if crypto_df is not None:
+                    st.write("**Crypto Snapshot:**")
+                    st.dataframe(crypto_df, hide_index=True)
+                    # basic advice
+                    for _, row in crypto_df.iterrows():
+                        if row["24h Change %"] > 5:
+                            st.warning(f"{row['Coin']} is up {row['24h Change %']}% – consider taking profit.")
+                        elif row["24h Change %"] < -5:
+                            st.warning(f"{row['Coin']} is down {row['24h Change %']}% – possible dip buy.")
+        st.markdown("---")
+        st.caption("Advice is based on technical indicators (RSI & MACD) and current price action. Always do your own research.")
+
+# ------------------------------------------------------------------
+# FOREX & CRYPTO FORECAST ENGINE (improved)
+# ------------------------------------------------------------------
+def weighted_linear_fit(x, y, tau=7):
+    """Exponentially weighted least squares for forecast."""
+    n = len(x)
+    weights = np.exp(-np.arange(n)[::-1] / tau)  # more weight to recent
+    W = np.diag(weights)
+    X = np.column_stack([np.ones_like(x), x])
+    XtW = X.T @ W
+    coeffs = np.linalg.solve(XtW @ X, XtW @ (W @ y))
+    return coeffs
+
 class ForexForecast:
     BASE_PRICES = {
         "EUR/USD": 1.08, "GBP/USD": 1.26, "USD/JPY": 144.5,
@@ -441,10 +514,10 @@ class ForexForecast:
         series = df[pair].tail(30)
         x = np.arange(len(series))
         y = series.values
-        coeffs = np.polyfit(x, y, 1)
+        coeffs = weighted_linear_fit(x, y, tau=7)  # improved
         last_idx = len(series) - 1
         future_x = np.array([last_idx + d for d in range(1, horizon_days+1)])
-        forecast_y = np.polyval(coeffs, future_x)
+        forecast_y = coeffs[0] + coeffs[1] * future_x
         return np.round(forecast_y, 4)
 
 class CryptoForecast:
@@ -473,10 +546,10 @@ class CryptoForecast:
         series = df[coin].tail(30)
         x = np.arange(len(series))
         y = series.values
-        coeffs = np.polyfit(x, y, 1)
+        coeffs = weighted_linear_fit(x, y, tau=7)  # improved
         last_idx = len(series) - 1
         future_x = np.array([last_idx + d for d in range(1, horizon_days+1)])
-        forecast_y = np.polyval(coeffs, future_x)
+        forecast_y = coeffs[0] + coeffs[1] * future_x
         return np.round(forecast_y, 2)
 
 # ------------------------------------------------------------------
@@ -519,9 +592,10 @@ class CryptoEngine:
             return None
 
 # ------------------------------------------------------------------
-# ADVANCED STRUCTURAL ANALYSIS (FEM + Load Distribution)
+# ADVANCED STRUCTURAL ANALYSIS (unchanged)
 # ------------------------------------------------------------------
 class StructuralAnalysis:
+    # ... (identical to original) ...
     @staticmethod
     def truss_fem(nodes, elements, forces, constraints):
         n_nodes = len(nodes)
@@ -597,6 +671,7 @@ class StructuralAnalysis:
 # BUILDING DESIGNER (3D)
 # ------------------------------------------------------------------
 class StructuralModel:
+    # ... (identical to original) ...
     ELEMENT_TYPES = {
         "column": ["rectangular", "circular"],
         "beam": ["rectangular"],
@@ -747,22 +822,41 @@ class StructuralModel:
 # ------------------------------------------------------------------
 # STREAMLIT UI
 # ------------------------------------------------------------------
-st.set_page_config(page_title="Arc OS Pro", layout="wide")
+st.set_page_config(page_title=" ", page_icon="🔄", layout="wide")
 
 def load_css():
     st.markdown("""
     <style>
-        .stApp { background: linear-gradient(135deg, #0f0c29, #302b63, #24243e); color: #e0e0e0; }
-        section[data-testid="stSidebar"] { background: rgba(20,20,40,0.8); backdrop-filter: blur(10px); border-right: 1px solid rgba(255,255,255,0.1); }
+        .stApp { background: linear-gradient(135deg, #0a0a1a, #1a1a3a, #2a2a4a); color: #e0e0e0; }
+        section[data-testid="stSidebar"] { background: rgba(20,20,40,0.85); backdrop-filter: blur(12px); border-right: 1px solid rgba(255,255,255,0.1); }
         h1,h2,h3 { font-family: 'Segoe UI', sans-serif; font-weight: 600; background: linear-gradient(90deg, #00d2ff, #3a7bd5); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
-        .glass-card { background: rgba(255,255,255,0.05); backdrop-filter: blur(15px); border-radius:16px; border:1px solid rgba(255,255,255,0.1); padding:20px; margin:10px 0; box-shadow:0 8px 32px rgba(0,0,0,0.37); }
-        .metric-box { background: rgba(255,255,255,0.08); border-radius:12px; padding:15px; margin:5px 0; text-align:center; font-weight:bold; border:1px solid rgba(255,255,255,0.15); }
+        .glass-card { background: rgba(255,255,255,0.03); backdrop-filter: blur(16px); border-radius:18px; border:1px solid rgba(255,255,255,0.08); padding:24px; margin:12px 0; box-shadow:0 12px 40px rgba(0,0,0,0.5); }
+        .metric-box { background: rgba(255,255,255,0.06); border-radius:14px; padding:18px; margin:6px 0; text-align:center; font-weight:bold; border:1px solid rgba(255,255,255,0.12); transition: all 0.2s ease; }
+        .metric-box:hover { background: rgba(255,255,255,0.1); }
         div.stButton > button { background: linear-gradient(45deg, #ff416c, #ff4b2b); border:none; color:white; padding:12px 28px; font-size:16px; font-weight:bold; border-radius:50px; box-shadow:0 0 20px rgba(255,75,43,0.5); transition:all 0.3s ease; cursor:pointer; letter-spacing:0.5px; text-transform:uppercase; width:100%; border:1px solid rgba(255,255,255,0.2); }
         div.stButton > button:hover { transform:translateY(-2px); box-shadow:0 0 30px rgba(255,75,43,0.8); background:linear-gradient(45deg, #ff4b2b, #ff416c); color:white; }
         .stForm button { background: linear-gradient(45deg, #00b4db, #0083b0) !important; }
+        .logo-container { display: flex; justify-content: center; margin: 10px 0 20px 0; }
     </style>""", unsafe_allow_html=True)
 
 load_css()
+
+# Logo SVG (no text)
+def show_logo():
+    st.markdown("""
+    <div class="logo-container">
+        <svg width="90" height="90" viewBox="0 0 100 100">
+            <defs>
+                <linearGradient id="arcGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" style="stop-color:#00d2ff;stop-opacity:1" />
+                    <stop offset="100%" style="stop-color:#3a7bd5;stop-opacity:1" />
+                </linearGradient>
+            </defs>
+            <path d="M15,80 A60,60 0 0,1 85,80" stroke="url(#arcGrad)" stroke-width="5" fill="none" stroke-linecap="round"/>
+            <circle cx="50" cy="68" r="6" fill="#ff4b2b" filter="drop-shadow(0 0 6px #ff4b2b)"/>
+        </svg>
+    </div>
+    """, unsafe_allow_html=True)
 
 if 'role' not in st.session_state:
     conn = get_db_connection()
@@ -792,76 +886,10 @@ if 'crypto_daily_hist' not in st.session_state:
     st.session_state.crypto_daily_hist = CryptoForecast.generate_daily_history(90, live_dict)
 
 # ------------------------------------------------------------------
-# WORKING VOICE COMMAND (Web Speech API via components & query params)
-# ------------------------------------------------------------------
-def voice_command_ui():
-    # Check for voice query param
-    params = st.query_params
-    if "voice" in params:
-        cmd = params["voice"]
-        st.session_state.voice_command = cmd.lower()
-        # Clear param so it doesn't re-trigger
-        del params["voice"]
-        st.query_params.clear()   # optional: clear all
-        st.rerun()
-
-    col1, col2 = st.columns([0.9, 0.1])
-    with col2:
-        if st.button("🎤 Voice Command"):
-            # Embed a tiny iframe that triggers speech recognition and redirects
-            voice_html = """
-            <script>
-            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-            if (SpeechRecognition) {
-                const recognition = new SpeechRecognition();
-                recognition.lang = 'en-US';
-                recognition.start();
-                recognition.onresult = function(event) {
-                    const transcript = event.results[0][0].transcript.trim();
-                    window.top.location.href = window.top.location.origin + window.top.location.pathname + "?voice=" + encodeURIComponent(transcript);
-                };
-                recognition.onerror = function() {
-                    alert("Voice recognition failed. Please try again.");
-                };
-            } else {
-                alert("Speech recognition not supported in this browser.");
-            }
-            </script>
-            """
-            st.components.v1.html(voice_html, height=0)
-        if "voice_command" in st.session_state:
-            cmd = st.session_state.voice_command
-            st.info(f"Voice command: {cmd}")
-            mode_map = {
-                "forex": "💱 Forex Pro",
-                "structural": "🏗️ Structural Pro",
-                "crypto": "₿ Crypto Tracker",
-                "wallet": "💳 Mobile Wallet",
-            }
-            if cmd in mode_map:
-                st.session_state.mode = mode_map[cmd]
-                st.success(f"Switched to {mode_map[cmd]}")
-            elif "balance" in cmd:
-                st.session_state.mode = "💳 Mobile Wallet"
-                st.success("Showing wallet balance")
-            elif "forecast" in cmd:
-                st.session_state.mode = "💱 Forex Pro"
-                st.success("Opening forecasts")
-            elif "signal" in cmd:
-                st.session_state.mode = "💱 Forex Pro"
-                st.success("Opening trading signals")
-            elif "logout" in cmd:
-                logout()
-            else:
-                st.warning("Command not recognized. Try: forex, crypto, structural, wallet, forecast, signals, balance, logout")
-            del st.session_state.voice_command
-            st.rerun()
-
-# ------------------------------------------------------------------
 # SIDEBAR & MODE SELECTION
 # ------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("## ⚙️ Arc OS Pro")
+    show_logo()
     st.write(f"👤 {st.session_state.username} ({st.session_state.role})")
     mode_options = ["💱 Forex Pro", "🏗️ Structural Pro", "₿ Crypto Tracker", "💳 Mobile Wallet"]
     if 'mode' not in st.session_state:
@@ -899,15 +927,15 @@ with st.sidebar:
 
     if st.button("🚪 Logout"):
         logout()
-    st.caption("v9.1 · Voice, Wallet, Signals")
+    st.caption("v9.1 · AI Advisor & Withdrawal")
 
-st.markdown("<h1 style='text-align: center;'>🌌 Arc | AI Operating System Pro</h1>", unsafe_allow_html=True)
-voice_command_ui()
+# AI Market Advisor (replaces voice commands)
+ai_market_advisor()
 
 # -------------------- Modules rendering --------------------
 if mode == "💱 Forex Pro":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    # ... (Forex Pro UI unchanged except for fixes already applied)
+    # ... (Forex Pro UI unchanged, ensure it works with new forecast)
     st.subheader("💹 Forex Pro: Live & Historical")
     forex_df = ForexEngine.get_live_data(use_real=st.session_state.use_real_forex)
     st.session_state.forex_data = forex_df
@@ -979,17 +1007,195 @@ if mode == "💱 Forex Pro":
 
 elif mode == "₿ Crypto Tracker":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    # ... (Crypto Tracker UI unchanged)
+    st.subheader("₿ Live Crypto Prices")
+    live_df = st.session_state.crypto_live_prices
+    if live_df is not None:
+        cols = st.columns(len(live_df))
+        for i, row in live_df.iterrows():
+            with cols[i]:
+                change_color = "green" if row["24h Change %"] >= 0 else "red"
+                st.markdown(f"""<div class="metric-box">
+                    <span style="font-size:18px;">{row['Coin']}</span><br>
+                    <span style="font-size:22px;">${row['Price (USD)']:,.2f}</span><br>
+                    <span style="color:{change_color};">{row['24h Change %']}%</span>
+                </div>""", unsafe_allow_html=True)
+    else:
+        st.warning("Could not fetch live crypto prices.")
+    if st.button("🔄 Refresh Crypto", key="crypto_refresh"):
+        st.session_state.crypto_live_prices = CryptoEngine.fetch_prices()
+        st.rerun()
+    st.subheader("📈 Historical (7d)")
+    coin_hist = st.selectbox("Select coin", CRYPTO_COINS, format_func=lambda x: CRYPTO_NAMES[x])
+    hist_crypto = CryptoEngine.get_historical(coin_hist, 7)
+    if hist_crypto is not None:
+        st.line_chart(hist_crypto)
+    st.subheader("🔮 Crypto Forecasts")
+    crypto_forecast_horizon = st.radio("Period", ["1 Day", "7 Days", "30 Days"], horizontal=True)
+    c_horizon = {"1 Day": 1, "7 Days": 7, "30 Days": 30}[crypto_forecast_horizon]
+    daily_crypto_hist = st.session_state.crypto_daily_hist
+    c_forecast_table = []
+    c_chart_data = {}
+    for coin in CRYPTO_COINS:
+        fcast = CryptoForecast.forecast(daily_crypto_hist, c_horizon, coin)
+        c_forecast_table.append({"Coin": CRYPTO_NAMES[coin], "Latest": daily_crypto_hist[coin].iloc[-1],
+                                 "Forecast": fcast[-1], "Change": round(fcast[-1] - daily_crypto_hist[coin].iloc[-1], 2)})
+        hist_part = daily_crypto_hist[coin].tail(30)
+        idx_hist = list(hist_part.index)
+        idx_fut = pd.date_range(idx_hist[-1] + pd.Timedelta(days=1), periods=c_horizon, freq='D')
+        combined = np.concatenate([hist_part.values, fcast])
+        c_chart_data[coin] = pd.Series(combined, index=list(idx_hist)+list(idx_fut))
+    c_fdf = pd.DataFrame(c_forecast_table)
+    st.dataframe(c_fdf.style.applymap(lambda x: 'color: #00ff88' if isinstance(x, (int,float)) and x>0 else 'color: #ff4b4b',
+                                      subset=['Change']), use_container_width=True)
+    crypto_chart_coin = st.selectbox("Coin for forecast chart", CRYPTO_COINS, format_func=lambda x: CRYPTO_NAMES[x], key="crypto_fcast_chart")
+    if crypto_chart_coin in c_chart_data:
+        st.line_chart(c_chart_data[crypto_chart_coin])
     st.markdown('</div>', unsafe_allow_html=True)
 
 elif mode == "🏗️ Structural Pro":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    # ... (Structural Pro UI unchanged)
+    tab1, tab2 = st.tabs(["📐 Beam Analysis", "🏢 3D Building Designer"])
+    with tab1:
+        st.subheader("Beam Analysis")
+        col1, col2 = st.columns(2)
+        with col1:
+            beam_length = st.number_input("Beam length (m)", 1.0, 20.0, 5.0)
+            load_type = st.selectbox("Load type", ["Point (kN)", "Uniform (kN/m)"])
+            load_mag = st.number_input("Load magnitude", 0.1, 1000.0, 10.0)
+            supports = st.selectbox("Support condition", ["simple", "fixed"])
+        with col2:
+            material = st.selectbox("Material", ["Steel", "Concrete", "Timber"])
+            if st.button("Calculate"):
+                reactions = StructuralAnalysis.beam_load_distribution(beam_length, load_type, load_mag, supports)
+                st.write("**Reactions:**", reactions)
+                # simplified stress
+                if supports == "simple":
+                    M_max = (load_mag * beam_length) / 4 if load_type=="Point (kN)" else (load_mag * beam_length**2)/8
+                else:
+                    M_max = load_mag * beam_length if load_type=="Point (kN)" else (load_mag * beam_length**2)/2
+                st.metric("Max Moment (kNm)", f"{M_max:.2f}")
+                st.success("Analysis saved to database.")
+                conn = get_db_connection()
+                c = conn.cursor()
+                c.execute('''INSERT INTO structural_analyses
+                             (timestamp, beam_length, load_magnitude, load_type, material, moment, shear, stress_bending, stress_shear, deflection, status)
+                             VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 'done')''',
+                          (datetime.now().isoformat(), beam_length, load_mag, load_type, material, M_max))
+                conn.commit()
+    with tab2:
+        st.subheader("3D Building Designer")
+        # ... (unchanged 3D building UI)
+        elem_type = st.selectbox("Element type", list(StructuralModel.ELEMENT_TYPES.keys()))
+        subtype = st.selectbox("Subtype", StructuralModel.ELEMENT_TYPES[elem_type])
+        with st.form("add_element_form"):
+            if elem_type == "column":
+                x = st.number_input("X position", value=0.0)
+                z = st.number_input("Z position", value=0.0)
+                height = st.number_input("Height", value=3.0)
+                if subtype == "circular":
+                    radius = st.number_input("Radius", value=0.15)
+                    params = {"x": x, "z": z, "height": height, "radius": radius}
+                else:
+                    width = st.number_input("Width", value=0.3)
+                    depth = st.number_input("Depth", value=0.3)
+                    params = {"x": x, "z": z, "height": height, "width": width, "depth": depth}
+            elif elem_type == "beam":
+                x1 = st.number_input("Start X", value=0.0)
+                z1 = st.number_input("Start Z", value=0.0)
+                x2 = st.number_input("End X", value=4.0)
+                z2 = st.number_input("End Z", value=0.0)
+                y = st.number_input("Y level", value=3.0)
+                width = st.number_input("Width", value=0.2)
+                depth = st.number_input("Depth", value=0.3)
+                params = {"x1": x1, "z1": z1, "x2": x2, "z2": z2, "y": y, "width": width, "depth": depth}
+            elif elem_type == "slab":
+                x = st.number_input("X position", value=0.0)
+                z = st.number_input("Z position", value=0.0)
+                width = st.number_input("Width", value=4.0)
+                depth = st.number_input("Depth", value=4.0)
+                thickness = st.number_input("Thickness", value=0.15)
+                y = st.number_input("Y level", value=3.0)
+                params = {"x": x, "z": z, "width": width, "depth": depth, "thickness": thickness, "y": y}
+            elif elem_type == "wall":
+                x1 = st.number_input("Start X", value=0.0)
+                z1 = st.number_input("Start Z", value=0.0)
+                x2 = st.number_input("End X", value=4.0)
+                z2 = st.number_input("End Z", value=0.0)
+                height = st.number_input("Height", value=3.0)
+                thickness = st.number_input("Thickness", value=0.15)
+                params = {"x1": x1, "z1": z1, "x2": x2, "z2": z2, "height": height, "thickness": thickness}
+            else:  # opening
+                pos_x = st.number_input("Position X", value=0.0)
+                pos_z = st.number_input("Position Z", value=0.0)
+                width = st.number_input("Width", value=1.0)
+                height = st.number_input("Height", value=2.1)
+                params = {"pos_x": pos_x, "pos_z": pos_z, "width": width, "height": height}
+            if st.form_submit_button("Add Element"):
+                StructuralModel.add_element(st.session_state.username, elem_type, subtype, params)
+                st.success("Element added!")
+        elements_df = StructuralModel.get_elements(st.session_state.username)
+        if not elements_df.empty:
+            st.dataframe(elements_df[["id","type","subtype"]])
+            if st.button("Delete Selected Element"):
+                sel_id = st.number_input("Element ID to delete", min_value=1, step=1)
+                if sel_id:
+                    StructuralModel.delete_element(sel_id)
+                    st.rerun()
+            st.subheader("3D View")
+            st.components.v1.html(StructuralModel.generate_3d_scene(elements_df), height=600)
     st.markdown('</div>', unsafe_allow_html=True)
 
 elif mode == "💳 Mobile Wallet":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    # ... (Wallet UI unchanged)
+    st.subheader("💳 Mobile Wallet")
+    balance = MobileWallet.get_balance(st.session_state.username)
+    st.metric("Current Balance", f"{balance:,.2f} (simulated)")
+
+    tab_w1, tab_w2 = st.tabs(["💰 Deposit", "💸 Withdraw"])
+    with tab_w1:
+        with st.form("deposit_form"):
+            phone = st.text_input("Phone number")
+            amount = st.number_input("Amount", min_value=1.0, step=10.0)
+            provider = st.selectbox("Provider", MobileWallet.PROVIDERS)
+            if st.form_submit_button("Request Deposit"):
+                ref = MobileWallet.deposit_request(st.session_state.username, phone, amount, provider)
+                st.success(f"Deposit request sent. Reference: {ref}")
+                st.info("To confirm, enter reference below:")
+                confirm_ref = st.text_input("Reference to confirm")
+                if confirm_ref and st.button("Confirm Deposit", key="confirm_dep"):
+                    if confirm_ref == ref:
+                        MobileWallet.confirm_deposit(ref)
+                        st.success("Deposit confirmed! Balance updated.")
+                        st.rerun()
+                    else:
+                        st.error("Invalid reference")
+    with tab_w2:
+        with st.form("withdraw_form"):
+            w_phone = st.text_input("Phone number", key="w_phone")
+            w_amount = st.number_input("Amount", min_value=1.0, step=10.0, key="w_amount")
+            w_provider = st.selectbox("Provider", MobileWallet.PROVIDERS, key="w_provider")
+            if st.form_submit_button("Request Withdrawal"):
+                ref, msg = MobileWallet.withdraw_request(st.session_state.username, w_phone, w_amount, w_provider)
+                if ref is None:
+                    st.error(msg)
+                else:
+                    st.success(f"Withdrawal request submitted. Reference: {ref}")
+                    st.info("Enter reference to confirm:")
+                    w_confirm_ref = st.text_input("Reference", key="w_confirm_ref")
+                    if w_confirm_ref and st.button("Confirm Withdrawal", key="confirm_wth"):
+                        if w_confirm_ref == ref:
+                            MobileWallet.confirm_withdrawal(ref)
+                            st.success("Withdrawal successful!")
+                            st.rerun()
+                        else:
+                            st.error("Invalid reference")
+
+    st.subheader("Transaction History")
+    txn_df = MobileWallet.get_transactions(st.session_state.username)
+    if not txn_df.empty:
+        st.dataframe(txn_df)
+    else:
+        st.info("No transactions yet.")
     st.markdown('</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
