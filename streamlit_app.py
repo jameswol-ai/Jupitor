@@ -8,9 +8,19 @@ import hashlib
 import json
 import smtplib
 from email.message import EmailMessage
+import plotly.graph_objects as go
+from streamlit_autorefresh import st_autorefresh
+import feedparser
+import base64
+import os
 
-# ---------- FIRST STREAMLIT COMMAND ----------
+# ------------------------------------------------------------------
+# MUST BE FIRST STREAMLIT COMMAND
+# ------------------------------------------------------------------
 st.set_page_config(page_title="Arc OS", page_icon="🔄", layout="wide")
+
+# AUTO REFRESH EVERY 30 SECONDS (simulate real‑time)
+st_autorefresh(interval=30000, key="datarefresh")
 
 # ------------------------------------------------------------------
 # GLOBAL CONSTANTS
@@ -18,6 +28,7 @@ st.set_page_config(page_title="Arc OS", page_icon="🔄", layout="wide")
 CRYPTO_COINS = ["bitcoin", "ethereum", "ripple", "cardano", "solana"]
 CRYPTO_NAMES = {"bitcoin": "BTC", "ethereum": "ETH", "ripple": "XRP",
                 "cardano": "ADA", "solana": "SOL"}
+THEME = st.session_state.get("theme", "dark")
 
 # ------------------------------------------------------------------
 # DATABASE SETUP
@@ -53,11 +64,18 @@ def init_db():
                   open_price REAL,
                   amount REAL,
                   leverage REAL DEFAULT 1,
+                  stop_loss REAL,
+                  take_profit REAL,
                   timestamp TEXT,
                   status TEXT DEFAULT 'open',
                   close_price REAL,
                   close_timestamp TEXT,
                   pnl REAL DEFAULT 0)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS alerts
+                 (username TEXT,
+                  symbol TEXT,
+                  price REAL,
+                  direction TEXT)''')
     conn.commit()
     return conn
 
@@ -67,7 +85,7 @@ def get_db_connection():
 init_db()
 
 # ------------------------------------------------------------------
-# AUTHENTICATION & USER MANAGEMENT
+# AUTHENTICATION & 2FA (simulated)
 # ------------------------------------------------------------------
 FALLBACK_USERS = {
     "demo": (hashlib.sha256("demo".encode()).hexdigest(), "user")
@@ -87,6 +105,13 @@ def authenticate(username, password):
         if hashlib.sha256(password.encode()).hexdigest() == h:
             return True, r
     return False, None
+
+def send_otp(email):
+    otp = str(np.random.randint(100000, 999999))
+    # store OTP in session state
+    st.session_state.otp = otp
+    send_email_notification(email, "Arc OS OTP", f"Your one‑time password is: {otp}")
+    return otp
 
 def add_user(username, password, email, role="user"):
     conn = get_db_connection()
@@ -123,7 +148,7 @@ def get_all_users():
     return df
 
 # ------------------------------------------------------------------
-# EMAIL SENDING
+# EMAIL
 # ------------------------------------------------------------------
 def send_email_notification(to_email, subject, body):
     try:
@@ -146,31 +171,8 @@ def send_email_notification(to_email, subject, body):
         return False
 
 # ------------------------------------------------------------------
-# MOBILE MONEY WALLET
+# MOBILE WALLET + TOP‑UP
 # ------------------------------------------------------------------
-#elif mode == "💳 Mobile Wallet":
-    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.subheader("💳 Mobile Wallet")
-    balance = MobileWallet.get_balance(st.session_state.username)
-    st.metric("Current Balance", f"${balance:,.2f}")
-
-    # Instant Top-Up (for testing / quick capital)
-    with st.expander("⚡ Instant Top‑Up (Simulated)"):
-        quick_amount = st.number_input("Amount to add", min_value=1.0, value=100.0, step=10.0)
-        if st.button("Add Funds Now"):
-            ref = f"TOPUP{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            conn = get_db_connection()
-            c = conn.cursor()
-            c.execute('''INSERT INTO wallet_transactions
-                         (username, type, amount, phone, provider, reference, status, timestamp)
-                         VALUES (?, 'deposit', ?, 'instant', 'Simulated', ?, 'completed', ?)''',
-                      (st.session_state.username, quick_amount, ref, datetime.now().isoformat()))
-            conn.commit()
-            st.success(f"${quick_amount:,.2f} added to your balance!")
-            st.rerun()
-
-    tab1, tab2 = st.tabs(["💰 Deposit", "💸 Withdraw"])
-    # ... (rest of deposit/withdraw forms unchanged)
 class MobileWallet:
     PROVIDERS = ["M-Pesa (Kenya)", "Airtel Money (Uganda)", "MTN MoMo (Uganda)"]
 
@@ -234,7 +236,7 @@ class MobileWallet:
         return df
 
 # ------------------------------------------------------------------
-# FOREX ENGINE
+# FOREX ENGINE (unchanged)
 # ------------------------------------------------------------------
 class ForexEngine:
     PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "UGX/USD", "KES/USD", "SSP/USD"]
@@ -343,7 +345,7 @@ class ForexEngine:
         return pd.DataFrame({"Time": times, "Volume": volume})
 
 # ------------------------------------------------------------------
-# TRADING SIGNALS (RSI + MACD)
+# TECHNICAL INDICATORS (Bollinger, SMA, etc.)
 # ------------------------------------------------------------------
 class TradingSignals:
     @staticmethod
@@ -380,12 +382,21 @@ class TradingSignals:
         return macd_line.values, signal_line.values, histogram.values
 
     @staticmethod
+    def bollinger_bands(prices, window=20, num_std=2):
+        rolling_mean = pd.Series(prices).rolling(window).mean()
+        rolling_std = pd.Series(prices).rolling(window).std()
+        upper_band = rolling_mean + (rolling_std * num_std)
+        lower_band = rolling_mean - (rolling_std * num_std)
+        return rolling_mean.values, upper_band.values, lower_band.values
+
+    @staticmethod
     def generate_signals(df, pair):
         prices = df[pair].values
         if len(prices) < 35:
             return []
         rsi = TradingSignals.compute_rsi(prices)
         macd, signal, hist = TradingSignals.compute_macd(prices)
+        bb_mid, bb_up, bb_low = TradingSignals.bollinger_bands(prices)
         signals = []
         last_rsi = rsi[-1]
         last_macd = macd[-1]
@@ -400,10 +411,14 @@ class TradingSignals:
             signals.append(("BUY", "MACD bullish crossover"))
         elif prev_macd > prev_signal and last_macd < last_signal:
             signals.append(("SELL", "MACD bearish crossover"))
+        if prices[-1] < bb_low[-1]:
+            signals.append(("BUY", "Price below lower Bollinger Band"))
+        elif prices[-1] > bb_up[-1]:
+            signals.append(("SELL", "Price above upper Bollinger Band"))
         return signals
 
 # ------------------------------------------------------------------
-# IMPROVED FORECAST
+# FORECAST
 # ------------------------------------------------------------------
 def weighted_linear_fit(x, y, tau=7):
     n = len(x)
@@ -519,17 +534,20 @@ class CryptoEngine:
             return None
 
 # ------------------------------------------------------------------
-# TRADING MODULE (NEW)
+# TRADING MODULE (with Stop‑Loss / Take‑Profit)
 # ------------------------------------------------------------------
 class TradingModule:
     @staticmethod
-    def open_trade(username, symbol, trade_type, amount, open_price, leverage=1):
+    def open_trade(username, symbol, trade_type, amount, open_price, leverage=1,
+                   stop_loss=None, take_profit=None):
         conn = get_db_connection()
         c = conn.cursor()
         ts = datetime.now().isoformat()
-        c.execute('''INSERT INTO trades (username, symbol, trade_type, open_price, amount, leverage, timestamp, status)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, 'open')''',
-                  (username, symbol, trade_type, open_price, amount, leverage, ts))
+        c.execute('''INSERT INTO trades (username, symbol, trade_type, open_price, amount, leverage,
+                     stop_loss, take_profit, timestamp, status)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')''',
+                  (username, symbol, trade_type, open_price, amount, leverage,
+                   stop_loss, take_profit, ts))
         conn.commit()
         return True
 
@@ -547,27 +565,47 @@ class TradingModule:
         trade = c.fetchone()
         if not trade:
             return False, "Trade not found."
-        (id, username, symbol, trade_type, open_price, amount, leverage, ts, status, _, _, _) = trade
+        (id, username, symbol, trade_type, open_price, amount, leverage,
+         stop_loss, take_profit, ts, status, _, _, _) = trade
         if status != 'open':
             return False, "Trade already closed."
-
-        # Calculate P&L
         if trade_type == 'buy':
             pnl = (close_price - open_price) * amount * leverage
         else:
             pnl = (open_price - close_price) * amount * leverage
-
         close_ts = datetime.now().isoformat()
         c.execute("UPDATE trades SET status='closed', close_price=?, close_timestamp=?, pnl=? WHERE id=?",
                   (close_price, close_ts, round(pnl, 4), trade_id))
-
-        # Update wallet balance with trade profit/loss
         ref = f"TRD{trade_id}{close_ts}"
         c.execute('''INSERT INTO wallet_transactions (username, type, amount, phone, provider, reference, status, timestamp)
                      VALUES (?, 'trade', ?, 'system', 'Trading', ?, 'completed', ?)''',
                   (username, round(pnl, 4), ref, close_ts))
         conn.commit()
         return True, f"Trade closed. P&L: ${pnl:.2f}"
+
+    @staticmethod
+    def check_stop_loss_take_profit(username):
+        positions = TradingModule.get_open_positions(username)
+        for _, pos in positions.iterrows():
+            if pos['symbol'] in ForexEngine.PAIRS:
+                current_price = st.session_state.forex_data.iloc[-1][pos['symbol']]
+            else:
+                live = st.session_state.crypto_live_prices
+                if live is not None:
+                    row = live[live['Coin']==CRYPTO_NAMES.get(pos['symbol'],'')]
+                    current_price = row.iloc[0]['Price (USD)'] if not row.empty else pos['open_price']
+                else:
+                    continue
+            if pos['stop_loss'] is not None and pos['stop_loss'] > 0:
+                if (pos['trade_type'] == 'buy' and current_price <= pos['stop_loss']) or \
+                   (pos['trade_type'] == 'sell' and current_price >= pos['stop_loss']):
+                    TradingModule.close_trade(pos['id'], current_price)
+                    st.toast(f"Stop‑loss triggered for {pos['symbol']} at {current_price}")
+            if pos['take_profit'] is not None and pos['take_profit'] > 0:
+                if (pos['trade_type'] == 'buy' and current_price >= pos['take_profit']) or \
+                   (pos['trade_type'] == 'sell' and current_price <= pos['take_profit']):
+                    TradingModule.close_trade(pos['id'], current_price)
+                    st.toast(f"Take‑profit triggered for {pos['symbol']} at {current_price}")
 
     @staticmethod
     def get_trade_history(username, limit=30):
@@ -577,86 +615,83 @@ class TradingModule:
         return df
 
 # ------------------------------------------------------------------
-# JUP AI – TRADING NEWS AGENT
+# PRICE ALERTS
 # ------------------------------------------------------------------
-def jup_ai_tab():
-    st.subheader("🤖 Jup AI · Trading Intelligence")
-    st.caption("Parametric news agent – BUY, HOLD, SELL with trade time frames.")
-    news = [
-        "Fed signals possible rate cut in next meeting.",
-        "Oil prices surge on supply disruption fears.",
-        "BTC whales accumulate ahead of halving event.",
-        "UGX weakens on political uncertainty.",
-        "Ethereum DeFi TVL hits new all-time high."
-    ]
-    for item in news:
-        st.info(item)
-
-    market = st.radio("Market", ["Forex", "Crypto"], horizontal=True)
-    if market == "Forex":
-        pair = st.selectbox("Select currency pair", ForexEngine.PAIRS)
-        df = st.session_state.forex_data
-        signals = TradingSignals.generate_signals(df, pair)
-        buy_signals = sum(1 for s in signals if s[0]=="BUY")
-        sell_signals = sum(1 for s in signals if s[0]=="SELL")
-        if buy_signals > sell_signals:
-            decision = "BUY"
-        elif sell_signals > buy_signals:
-            decision = "SELL"
+def check_price_alerts(username):
+    conn = get_db_connection()
+    alerts = pd.read_sql_query("SELECT * FROM alerts WHERE username=?", conn, params=(username,))
+    for _, alert in alerts.iterrows():
+        symbol = alert['symbol']
+        price_target = alert['price']
+        direction = alert['direction']
+        if symbol in ForexEngine.PAIRS:
+            current = st.session_state.forex_data.iloc[-1][symbol]
         else:
-            decision = "HOLD"
-        st.markdown(f"### Decision: **{decision}**")
-        time_frame = "Scalp (mins)" if abs(df[pair].pct_change().iloc[-1])>0.002 else "Swing (days)"
-        st.metric("Suggested Trade Time", time_frame)
-        st.subheader("📈 Forecast")
-        horizon = st.selectbox("Horizon", ["1 Day", "7 Days (Week)", "30 Days (Month)"])
-        days = {"1 Day":1, "7 Days (Week)":7, "30 Days (Month)":30}[horizon]
-        daily_hist = st.session_state.forex_daily_hist
-        fcast = ForexForecast.forecast(daily_hist, days, pair)
-        hist_part = daily_hist[pair].tail(30)
-        idx_hist = list(hist_part.index)
-        idx_fut = pd.date_range(idx_hist[-1] + pd.Timedelta(days=1), periods=days, freq='D')
-        combined = np.concatenate([hist_part.values, fcast])
-        chart = pd.Series(combined, index=list(idx_hist)+list(idx_fut))
-        st.line_chart(chart)
-    else:
-        coin = st.selectbox("Select coin", CRYPTO_COINS, format_func=lambda x: CRYPTO_NAMES[x])
-        live = st.session_state.crypto_live_prices
-        if live is not None:
-            row = live[live['Coin']==CRYPTO_NAMES[coin]]
-            if not row.empty:
-                change = row.iloc[0]['24h Change %']
-                if change > 3:
-                    decision = "SELL"
-                elif change < -3:
-                    decision = "BUY"
-                else:
-                    decision = "HOLD"
-                st.markdown(f"### Decision: **{decision}**")
-                time_frame = "Scalp (minutes)" if abs(change)>5 else "Swing (days)"
-                st.metric("Suggested Trade Time", time_frame)
-        daily_hist = st.session_state.crypto_daily_hist
-        horizon = st.selectbox("Horizon", ["1 Day", "7 Days (Week)", "30 Days (Month)"])
-        days = {"1 Day":1, "7 Days (Week)":7, "30 Days (Month)":30}[horizon]
-        fcast = CryptoForecast.forecast(daily_hist, days, coin)
-        hist_part = daily_hist[coin].tail(30)
-        idx_hist = list(hist_part.index)
-        idx_fut = pd.date_range(idx_hist[-1] + pd.Timedelta(days=1), periods=days, freq='D')
-        combined = np.concatenate([hist_part.values, fcast])
-        chart = pd.Series(combined, index=list(idx_hist)+list(idx_fut))
-        st.line_chart(chart)
+            live = st.session_state.crypto_live_prices
+            if live is not None:
+                row = live[live['Coin']==CRYPTO_NAMES.get(symbol, '')]
+                current = row.iloc[0]['Price (USD)'] if not row.empty else None
+            else:
+                continue
+        if current is not None:
+            if direction == 'above' and current >= price_target:
+                st.toast(f"🚨 {symbol} is now above {price_target}!")
+                # remove alert after firing
+                c = conn.cursor()
+                c.execute("DELETE FROM alerts WHERE username=? AND symbol=? AND price=? AND direction=?",
+                          (username, symbol, price_target, direction))
+                conn.commit()
+            elif direction == 'below' and current <= price_target:
+                st.toast(f"🚨 {symbol} is now below {price_target}!")
+                c = conn.cursor()
+                c.execute("DELETE FROM alerts WHERE username=? AND symbol=? AND price=? AND direction=?",
+                          (username, symbol, price_target, direction))
+                conn.commit()
 
 # ------------------------------------------------------------------
-# SESSION STATE INIT
+# BACKTESTING (simple)
+# ------------------------------------------------------------------
+def backtest_rsi_strategy(prices, rsi_period=14, oversold=30, overbought=70):
+    rsi = TradingSignals.compute_rsi(prices, rsi_period)
+    capital = 10000
+    position = 0
+    equity = [capital]
+    for i in range(rsi_period, len(prices)-1):
+        if rsi[i] < oversold and position == 0:
+            position = capital / prices[i]
+            capital = 0
+        elif rsi[i] > overbought and position > 0:
+            capital = position * prices[i]
+            position = 0
+        equity.append(capital + position * prices[i])
+    return equity
+
+# ------------------------------------------------------------------
+# SENTIMENT ANALYSIS (RSS)
+# ------------------------------------------------------------------
+def fetch_market_sentiment():
+    sentiment_score = 0
+    try:
+        feed = feedparser.parse("https://www.investing.com/rss/news_25.rss")
+        for entry in feed.entries[:5]:
+            if "bull" in entry.title.lower() or "gain" in entry.title.lower():
+                sentiment_score += 1
+            elif "bear" in entry.title.lower() or "drop" in entry.title.lower():
+                sentiment_score -= 1
+    except:
+        # fallback random sentiment
+        sentiment_score = np.random.randint(-3, 4)
+    return sentiment_score
+
+# ------------------------------------------------------------------
+# SESSION STATE & LOGIN
 # ------------------------------------------------------------------
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 if "show_registration" not in st.session_state:
     st.session_state.show_registration = False
 
-# ------------------------------------------------------------------
-# LOGO (no text)
-# ------------------------------------------------------------------
+# Logo
 def show_logo():
     st.markdown("""
     <div class="logo-container">
@@ -673,26 +708,30 @@ def show_logo():
     </div>
     """, unsafe_allow_html=True)
 
-# ------------------------------------------------------------------
-# AUTHENTICATION PAGES
-# ------------------------------------------------------------------
 def login():
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         show_logo()
+        use_2fa = st.checkbox("Enable 2‑Factor Authentication (OTP)")
         with st.form("login_form"):
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
+            if use_2fa:
+                otp = st.text_input("OTP (sent to your email)")
             submitted = st.form_submit_button("Login")
             if submitted:
                 success, role = authenticate(username, password)
                 if success:
+                    if use_2fa:
+                        if 'otp' not in st.session_state or otp != st.session_state.otp:
+                            st.error("Invalid OTP")
+                            st.stop()
                     st.session_state.authenticated = True
                     st.session_state.username = username
                     st.session_state.role = role
                     st.rerun()
                 else:
-                    st.error("Invalid username or password")
+                    st.error("Invalid credentials")
         if st.button("Create an account"):
             st.session_state.show_registration = True
             st.rerun()
@@ -732,23 +771,33 @@ def logout():
     st.rerun()
 
 # ------------------------------------------------------------------
-# UI (CSS)
+# UI THEME TOGGLE
 # ------------------------------------------------------------------
-st.markdown("""
+theme = st.radio("🎨 Theme", ["dark", "light"], horizontal=True, index=0 if st.session_state.get("theme","dark")=="dark" else 1, key="theme_toggle")
+st.session_state.theme = theme
+
+if theme == "light":
+    bg_style = "background: linear-gradient(135deg, #f0f2f6, #ffffff); color: #111;"
+    sidebar_style = "background: rgba(255,255,255,0.9);"
+else:
+    bg_style = "background: linear-gradient(135deg, #0a0a1a, #1a1a3a, #2a2a4a); color: #e0e0e0;"
+    sidebar_style = "background: rgba(20,20,40,0.85); backdrop-filter: blur(12px); border-right: 1px solid rgba(255,255,255,0.1);"
+
+st.markdown(f"""
 <style>
-    .stApp { background: linear-gradient(135deg, #0a0a1a, #1a1a3a, #2a2a4a); color: #e0e0e0; }
-    section[data-testid="stSidebar"] { background: rgba(20,20,40,0.85); backdrop-filter: blur(12px); border-right: 1px solid rgba(255,255,255,0.1); }
-    h1,h2,h3 { font-family: 'Segoe UI', sans-serif; font-weight: 600; background: linear-gradient(90deg, #00d2ff, #3a7bd5); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
-    .glass-card { background: rgba(255,255,255,0.03); backdrop-filter: blur(16px); border-radius:18px; border:1px solid rgba(255,255,255,0.08); padding:24px; margin:12px 0; box-shadow:0 12px 40px rgba(0,0,0,0.5); }
-    .metric-box { background: rgba(255,255,255,0.06); border-radius:14px; padding:18px; margin:6px 0; text-align:center; font-weight:bold; border:1px solid rgba(255,255,255,0.12); transition: all 0.2s ease; }
-    .metric-box:hover { background: rgba(255,255,255,0.1); }
-    div.stButton > button { background: linear-gradient(45deg, #ff416c, #ff4b2b); border:none; color:white; padding:12px 28px; font-size:16px; font-weight:bold; border-radius:50px; box-shadow:0 0 20px rgba(255,75,43,0.5); transition:all 0.3s ease; cursor:pointer; letter-spacing:0.5px; text-transform:uppercase; width:100%; border:1px solid rgba(255,255,255,0.2); }
-    div.stButton > button:hover { transform:translateY(-2px); box-shadow:0 0 30px rgba(255,75,43,0.8); background:linear-gradient(45deg, #ff4b2b, #ff416c); color:white; }
-    .stForm button { background: linear-gradient(45deg, #00b4db, #0083b0) !important; }
-    .logo-container { display: flex; justify-content: center; margin: 10px 0 20px 0; }
+    .stApp {{ {bg_style} }}
+    section[data-testid="stSidebar"] {{ {sidebar_style} }}
+    h1,h2,h3 {{ font-family: 'Segoe UI', sans-serif; font-weight: 600; background: linear-gradient(90deg, #00d2ff, #3a7bd5); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }}
+    .glass-card {{ background: rgba(255,255,255,0.06); backdrop-filter: blur(16px); border-radius:18px; border:1px solid rgba(255,255,255,0.1); padding:24px; margin:12px 0; box-shadow:0 12px 40px rgba(0,0,0,0.5); }}
+    .metric-box {{ background: rgba(255,255,255,0.1); border-radius:14px; padding:18px; margin:6px 0; text-align:center; font-weight:bold; border:1px solid rgba(255,255,255,0.15); }}
+    div.stButton > button {{ background: linear-gradient(45deg, #ff416c, #ff4b2b); border:none; color:white; padding:12px 28px; font-size:16px; font-weight:bold; border-radius:50px; box-shadow:0 0 20px rgba(255,75,43,0.5); transition:all 0.3s ease; cursor:pointer; letter-spacing:0.5px; text-transform:uppercase; width:100%; border:1px solid rgba(255,255,255,0.2); }}
+    div.stButton > button:hover {{ transform:translateY(-2px); box-shadow:0 0 30px rgba(255,75,43,0.8); }}
+    .stForm button {{ background: linear-gradient(45deg, #00b4db, #0083b0) !important; }}
 </style>""", unsafe_allow_html=True)
 
-# Initialize data
+# ------------------------------------------------------------------
+# DATA INIT
+# ------------------------------------------------------------------
 if 'role' not in st.session_state:
     conn = get_db_connection()
     c = conn.cursor()
@@ -775,6 +824,10 @@ if 'crypto_daily_hist' not in st.session_state:
                     live_dict[cid] = row["Price (USD)"]
     st.session_state.crypto_daily_hist = CryptoForecast.generate_daily_history(90, live_dict)
 
+# Check stop‑loss / take‑profit and alerts
+TradingModule.check_stop_loss_take_profit(st.session_state.username)
+check_price_alerts(st.session_state.username)
+
 # ------------------------------------------------------------------
 # SIDEBAR
 # ------------------------------------------------------------------
@@ -786,19 +839,14 @@ with st.sidebar:
         st.session_state.mode = mode_options[0]
     mode = st.radio("🧠 Engine", mode_options, index=mode_options.index(st.session_state.mode))
     st.session_state.mode = mode
-
     if mode == "💱 Forex Pro":
         st.checkbox("Real‑time forex", value=st.session_state.use_real_forex, key="use_real_forex")
-
     with st.expander("⚙️ Account Settings"):
         new_email = st.text_input("New email", value="")
         if st.button("Update Email"):
             if new_email:
                 update_user_email(st.session_state.username, new_email)
                 st.success("Email updated.")
-            else:
-                st.error("Please enter an email.")
-
     if st.session_state.role == "admin":
         with st.expander("👥 User Management"):
             st.subheader("Add User")
@@ -833,10 +881,9 @@ with st.sidebar:
                             else:
                                 st.error(d_msg)
                             st.rerun()
-
     if st.button("🚪 Logout"):
         logout()
-    st.caption("v11 · Trading & AI")
+    st.caption("v12 · PWA & Trading")
 
 # ------------------------------------------------------------------
 # DASHBOARD
@@ -857,11 +904,11 @@ if mode == "📊 Dashboard":
         if crypto_df is not None:
             best = crypto_df.loc[crypto_df['24h Change %'].idxmax()]
             st.metric("Top Crypto", best['Coin'], f"{best['24h Change %']}%")
-    st.markdown("---")
-    st.subheader("Market Snapshot")
+    sentiment = fetch_market_sentiment()
+    st.metric("Market Sentiment", "Bullish" if sentiment>0 else "Bearish" if sentiment<0 else "Neutral")
     st.line_chart(forex_df.set_index("Time")[["EUR/USD", "GBP/USD"]])
     if crypto_df is not None:
-        st.dataframe(crypto_df, hide_index=True, use_container_width=True)
+        st.dataframe(crypto_df, use_container_width=True, hide_index=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
@@ -869,7 +916,7 @@ if mode == "📊 Dashboard":
 # ------------------------------------------------------------------
 elif mode == "💱 Forex Pro":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.subheader("💹 Forex Pro: Live & Historical")
+    st.subheader("💹 Forex Pro")
     forex_df = ForexEngine.get_live_data(use_real=st.session_state.use_real_forex)
     st.session_state.forex_data = forex_df
     summary = ForexEngine.get_summary(forex_df)
@@ -887,8 +934,6 @@ elif mode == "💱 Forex Pro":
     hist_df = ForexEngine.get_history(pair_hist, 30)
     if not hist_df.empty:
         st.line_chart(hist_df.set_index("timestamp"))
-    else:
-        st.info("No history yet.")
     st.bar_chart(st.session_state.forex_volume.set_index("Time"))
     st.table(ForexEngine.get_correlation_matrix(forex_df))
     if st.button("🔄 Refresh Live Data"):
@@ -923,18 +968,70 @@ elif mode == "₿ Crypto Tracker":
     hist = CryptoEngine.get_historical(coin_hist, 7)
     if hist is not None:
         st.line_chart(hist)
+    # Staking simulator
+    with st.expander("🥩 Crypto Staking Simulator"):
+        stake_coin = st.selectbox("Coin to stake", CRYPTO_COINS, format_func=lambda x: CRYPTO_NAMES[x])
+        stake_amount = st.number_input("Amount", min_value=0.01, value=1.0)
+        apy = st.slider("Estimated APY (%)", 0.0, 50.0, 5.0)
+        days = st.slider("Staking period (days)", 1, 365, 30)
+        earnings = stake_amount * (apy/100) * (days/365)
+        st.metric("Estimated Earnings", f"${earnings:,.2f}")
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
-# JUP AI
+# JUP AI (with backtesting)
 # ------------------------------------------------------------------
 elif mode == "🤖 Jup AI":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    jup_ai_tab()
+    st.subheader("🤖 Jup AI · Trading Intelligence")
+    sentiment = fetch_market_sentiment()
+    st.metric("News Sentiment", "Bullish" if sentiment>0 else "Bearish" if sentiment<0 else "Neutral")
+    news = [
+        "Fed signals possible rate cut in next meeting.",
+        "Oil prices surge on supply disruption fears.",
+        "BTC whales accumulate ahead of halving event.",
+        "UGX weakens on political uncertainty."
+    ]
+    for item in news:
+        st.info(item)
+    market = st.radio("Market", ["Forex", "Crypto"], horizontal=True)
+    if market == "Forex":
+        pair = st.selectbox("Select currency pair", ForexEngine.PAIRS)
+        df = st.session_state.forex_data
+        signals = TradingSignals.generate_signals(df, pair)
+        buy_signals = sum(1 for s in signals if s[0]=="BUY")
+        sell_signals = sum(1 for s in signals if s[0]=="SELL")
+        if buy_signals > sell_signals:
+            decision = "BUY"
+        elif sell_signals > buy_signals:
+            decision = "SELL"
+        else:
+            decision = "HOLD"
+        st.markdown(f"### Decision: **{decision}**")
+        # Backtest
+        prices = df[pair].values
+        equity = backtest_rsi_strategy(prices)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(y=equity, mode='lines', name='Equity'))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        coin = st.selectbox("Select coin", CRYPTO_COINS, format_func=lambda x: CRYPTO_NAMES[x])
+        live = st.session_state.crypto_live_prices
+        if live is not None:
+            row = live[live['Coin']==CRYPTO_NAMES[coin]]
+            if not row.empty:
+                change = row.iloc[0]['24h Change %']
+                if change > 3:
+                    decision = "SELL"
+                elif change < -3:
+                    decision = "BUY"
+                else:
+                    decision = "HOLD"
+                st.markdown(f"### Decision: **{decision}**")
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
-# TRADING (NEW)
+# TRADING (with advanced orders, risk dashboard, export)
 # ------------------------------------------------------------------
 elif mode == "📈 Trading":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
@@ -942,12 +1039,10 @@ elif mode == "📈 Trading":
     balance = MobileWallet.get_balance(st.session_state.username)
     st.metric("Available Capital", f"${balance:,.2f}")
 
-    # Open new trade
     with st.expander("➕ New Trade"):
         market = st.selectbox("Market", ["Forex", "Crypto"])
         if market == "Forex":
             symbol = st.selectbox("Pair", ForexEngine.PAIRS)
-            # get latest price
             latest_price = st.session_state.forex_data.iloc[-1][symbol]
         else:
             symbol = st.selectbox("Coin", CRYPTO_COINS, format_func=lambda x: CRYPTO_NAMES[x])
@@ -960,27 +1055,38 @@ elif mode == "📈 Trading":
         trade_type = st.selectbox("Direction", ["buy", "sell"])
         amount = st.number_input("Amount (units)", min_value=0.01, value=1.0, step=0.1)
         leverage = st.selectbox("Leverage", [1, 2, 5, 10], index=0)
+        stop_loss = st.number_input("Stop‑Loss price (optional)", value=0.0, step=0.01)
+        take_profit = st.number_input("Take‑Profit price (optional)", value=0.0, step=0.01)
+        total_value = amount * latest_price * leverage
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("Current Price", f"${latest_price:,.4f}" if latest_price else "N/A")
+            st.metric("Current Price", f"${latest_price:,.4f}")
         with col2:
-            total_value = amount * latest_price * leverage
             st.metric("Total Exposure", f"${total_value:,.2f}")
         if st.button("Execute Trade"):
             if total_value > balance:
-                st.error("Insufficient balance (you need at least the exposure amount).")
+                st.error("Insufficient balance.")
             else:
-                TradingModule.open_trade(st.session_state.username, symbol, trade_type, amount, latest_price, leverage)
-                st.success(f"{trade_type.upper()} order placed for {amount} {symbol}")
+                TradingModule.open_trade(st.session_state.username, symbol, trade_type, amount, latest_price, leverage,
+                                         stop_loss if stop_loss>0 else None, take_profit if take_profit>0 else None)
+                st.success(f"{trade_type.upper()} order placed.")
                 st.rerun()
+
+    # Risk Dashboard
+    positions = TradingModule.get_open_positions(st.session_state.username)
+    if not positions.empty:
+        total_exposure = 0
+        for _, pos in positions.iterrows():
+            total_exposure += pos['amount'] * pos['open_price'] * pos['leverage']
+        st.metric("Total Exposure", f"${total_exposure:,.2f}")
+        st.metric("Margin Level", f"{(balance / total_exposure * 100) if total_exposure else 100:.1f}%")
 
     # Open positions
     st.subheader("📊 Open Positions")
-    positions = TradingModule.get_open_positions(st.session_state.username)
     if not positions.empty:
         for idx, pos in positions.iterrows():
             with st.container():
-                cols = st.columns([2,1,1,1,1])
+                cols = st.columns([2,1,1,1,1,1])
                 with cols[0]:
                     st.write(f"**{pos['symbol']}** ({pos['trade_type']})")
                 with cols[1]:
@@ -988,7 +1094,6 @@ elif mode == "📈 Trading":
                 with cols[2]:
                     st.write(f"Amount: {pos['amount']}")
                 with cols[3]:
-                    # get current price
                     if pos['symbol'] in ForexEngine.PAIRS:
                         current_price = st.session_state.forex_data.iloc[-1][pos['symbol']]
                     else:
@@ -998,11 +1103,7 @@ elif mode == "📈 Trading":
                             current_price = row.iloc[0]['Price (USD)'] if not row.empty else pos['open_price']
                         else:
                             current_price = pos['open_price']
-                    # unrealized P&L
-                    if pos['trade_type'] == 'buy':
-                        upnl = (current_price - pos['open_price']) * pos['amount'] * pos['leverage']
-                    else:
-                        upnl = (pos['open_price'] - current_price) * pos['amount'] * pos['leverage']
+                    upnl = (current_price - pos['open_price']) * pos['amount'] * pos['leverage'] if pos['trade_type']=='buy' else (pos['open_price'] - current_price) * pos['amount'] * pos['leverage']
                     color = "green" if upnl >=0 else "red"
                     st.markdown(f"Unreal. P&L: <span style='color:{color}'>${upnl:.2f}</span>", unsafe_allow_html=True)
                 with cols[4]:
@@ -1016,10 +1117,28 @@ elif mode == "📈 Trading":
     else:
         st.info("No open positions.")
 
-    # Trade history
+    # Price alerts
+    st.subheader("🔔 Set Price Alert")
+    with st.form("alert_form"):
+        alert_symbol = st.selectbox("Symbol", ForexEngine.PAIRS + list(CRYPTO_NAMES.values()))
+        alert_price = st.number_input("Target price", value=0.0)
+        alert_direction = st.selectbox("When price is", ["above", "below"])
+        if st.form_submit_button("Create Alert"):
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("INSERT INTO alerts (username, symbol, price, direction) VALUES (?, ?, ?, ?)",
+                      (st.session_state.username, alert_symbol, alert_price, alert_direction))
+            conn.commit()
+            st.success("Alert set!")
+
+    # Trade history & export
     st.subheader("📜 Trade History")
     history = TradingModule.get_trade_history(st.session_state.username)
     if not history.empty:
+        csv = history.to_csv(index=False)
+        b64 = base64.b64encode(csv.encode()).decode()
+        href = f'<a href="data:file/csv;base64,{b64}" download="trades.csv">📥 Download CSV</a>'
+        st.markdown(href, unsafe_allow_html=True)
         st.dataframe(history[['symbol','trade_type','open_price','close_price','amount','leverage','pnl','status','timestamp']], use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1031,20 +1150,31 @@ elif mode == "💳 Mobile Wallet":
     st.subheader("💳 Mobile Wallet")
     balance = MobileWallet.get_balance(st.session_state.username)
     st.metric("Current Balance", f"${balance:,.2f}")
-
+    with st.expander("⚡ Instant Top‑Up (Simulated)"):
+        quick_amount = st.number_input("Amount to add", min_value=1.0, value=100.0, step=10.0)
+        if st.button("Add Funds Now"):
+            ref = f"TOPUP{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute('''INSERT INTO wallet_transactions
+                         (username, type, amount, phone, provider, reference, status, timestamp)
+                         VALUES (?, 'deposit', ?, 'instant', 'Simulated', ?, 'completed', ?)''',
+                      (st.session_state.username, quick_amount, ref, datetime.now().isoformat()))
+            conn.commit()
+            st.success(f"${quick_amount:,.2f} added!")
+            st.rerun()
     tab1, tab2 = st.tabs(["💰 Deposit", "💸 Withdraw"])
     with tab1:
         with st.form("deposit_form"):
             phone = st.text_input("Phone number")
             amount = st.number_input("Amount", min_value=1.0, step=10.0)
             provider = st.selectbox("Provider", MobileWallet.PROVIDERS)
-            submitted = st.form_submit_button("Request Deposit")
-            if submitted:
+            if st.form_submit_button("Request Deposit"):
                 ref = MobileWallet.deposit_request(st.session_state.username, phone, amount, provider)
                 st.session_state.deposit_ref = ref
-                st.success(f"Deposit requested. Reference: {ref}")
+                st.success(f"Reference: {ref}")
         if 'deposit_ref' in st.session_state:
-            confirm_ref = st.text_input("Enter reference to confirm", key="confirm_dep_ref")
+            confirm_ref = st.text_input("Confirm reference", key="dep_confirm")
             if st.button("✅ Confirm Deposit"):
                 if confirm_ref == st.session_state.deposit_ref:
                     MobileWallet.confirm_deposit(confirm_ref)
@@ -1058,16 +1188,15 @@ elif mode == "💳 Mobile Wallet":
             phone = st.text_input("Phone number", key="w_phone")
             amount = st.number_input("Amount", min_value=1.0, step=10.0, key="w_amount")
             provider = st.selectbox("Provider", MobileWallet.PROVIDERS, key="w_provider")
-            submitted = st.form_submit_button("Request Withdrawal")
-            if submitted:
+            if st.form_submit_button("Request Withdrawal"):
                 ref, msg = MobileWallet.withdraw_request(st.session_state.username, phone, amount, provider)
                 if ref is None:
                     st.error(msg)
                 else:
                     st.session_state.withdraw_ref = ref
-                    st.success(f"Withdrawal requested. Reference: {ref}")
+                    st.success(f"Reference: {ref}")
         if 'withdraw_ref' in st.session_state:
-            confirm_ref = st.text_input("Enter reference to confirm", key="confirm_wth_ref")
+            confirm_ref = st.text_input("Confirm reference", key="wth_confirm")
             if st.button("✅ Confirm Withdrawal"):
                 if confirm_ref == st.session_state.withdraw_ref:
                     MobileWallet.confirm_withdrawal(confirm_ref)
@@ -1076,19 +1205,27 @@ elif mode == "💳 Mobile Wallet":
                     st.rerun()
                 else:
                     st.error("Invalid reference")
-
     st.subheader("Transaction History")
     txn_df = MobileWallet.get_transactions(st.session_state.username)
     if not txn_df.empty:
-        # color status using 'map' instead of 'applymap'
         def color_status(val):
-            color = 'green' if val == 'completed' else 'orange' if val == 'pending' else 'red'
+            color = 'green' if val == 'completed' else 'orange'
             return f'color: {color}'
         styled = txn_df.style.map(color_status, subset=['status'])
         st.dataframe(styled, use_container_width=True)
-    else:
-        st.info("No transactions yet.")
     st.markdown('</div>', unsafe_allow_html=True)
 
-if __name__ == "__main__":
-    pass
+# ------------------------------------------------------------------
+# LEADERBOARD (simple)
+# ------------------------------------------------------------------
+if st.button("🏆 Leaderboard"):
+    conn = get_db_connection()
+    balances = []
+    users = get_all_users()
+    for _, row in users.iterrows():
+        bal = MobileWallet.get_balance(row['username'])
+        balances.append((row['username'], bal))
+    balances.sort(key=lambda x: x[1], reverse=True)
+    st.subheader("Top Traders")
+    for i, (user, bal) in enumerate(balances[:10]):
+        st.write(f"{i+1}. {user}: ${bal:,.2f}")
