@@ -1,0 +1,20 @@
+{
+  "name": "Jupitor OS Pro",
+  "short_name": "ArcOS",
+  "start_url": "https://your-app.streamlit.app/?pwa=true",
+  "display": "standalone",
+  "background_color": "#0a0a1a",
+  "theme_color": "#3a7bd5",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
