@@ -1225,12 +1225,3 @@ if st.button("🏆 Leaderboard"):
     for i, (user, bal) in enumerate(balances[:10]):
         st.write(f"{i+1}. {user}: ${bal:,.2f}")
 
-# ------------------------------------------------------------------
-# PWA INSTRUCTIONS (for deployment)
-# ------------------------------------------------------------------
-st.markdown("""
----
-**📲 Install as App (PWA):**  
-To make this app installable on your phone, create a `manifest.json` and `service-worker.js` and host them on a static site that embeds this Streamlit app in an iframe.  
-See [Streamlit PWA Guide](https://blog.streamlit.io/how-to-make-a-pwa-with-streamlit/) for details.
-""")
