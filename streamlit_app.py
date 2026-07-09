@@ -9,6 +9,9 @@ import json
 import smtplib
 from email.message import EmailMessage
 
+# ---------- FIRST STREAMLIT COMMAND ----------
+st.set_page_config(page_title="Arc OS", page_icon="🔄", layout="wide")
+
 # ------------------------------------------------------------------
 # GLOBAL CONSTANTS
 # ------------------------------------------------------------------
@@ -42,6 +45,19 @@ def init_db():
                   username TEXT, type TEXT, amount REAL,
                   phone TEXT, provider TEXT, reference TEXT,
                   status TEXT, timestamp TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS trades
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  username TEXT,
+                  symbol TEXT,
+                  trade_type TEXT,
+                  open_price REAL,
+                  amount REAL,
+                  leverage REAL DEFAULT 1,
+                  timestamp TEXT,
+                  status TEXT DEFAULT 'open',
+                  close_price REAL,
+                  close_timestamp TEXT,
+                  pnl REAL DEFAULT 0)''')
     conn.commit()
     return conn
 
@@ -139,7 +155,7 @@ class MobileWallet:
     def get_balance(username):
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT SUM(CASE WHEN type='deposit' THEN amount WHEN type='withdrawal' THEN -amount ELSE 0 END) FROM wallet_transactions WHERE username=? AND status='completed'", (username,))
+        c.execute("SELECT SUM(CASE WHEN type='deposit' THEN amount WHEN type='withdrawal' THEN -amount WHEN type='trade' THEN amount ELSE 0 END) FROM wallet_transactions WHERE username=? AND status='completed'", (username,))
         row = c.fetchone()
         return row[0] if row[0] is not None else 0.0
 
@@ -480,6 +496,64 @@ class CryptoEngine:
             return None
 
 # ------------------------------------------------------------------
+# TRADING MODULE (NEW)
+# ------------------------------------------------------------------
+class TradingModule:
+    @staticmethod
+    def open_trade(username, symbol, trade_type, amount, open_price, leverage=1):
+        conn = get_db_connection()
+        c = conn.cursor()
+        ts = datetime.now().isoformat()
+        c.execute('''INSERT INTO trades (username, symbol, trade_type, open_price, amount, leverage, timestamp, status)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, 'open')''',
+                  (username, symbol, trade_type, open_price, amount, leverage, ts))
+        conn.commit()
+        return True
+
+    @staticmethod
+    def get_open_positions(username):
+        conn = get_db_connection()
+        df = pd.read_sql_query("SELECT * FROM trades WHERE username=? AND status='open'", conn, params=(username,))
+        return df
+
+    @staticmethod
+    def close_trade(trade_id, close_price):
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT * FROM trades WHERE id=?", (trade_id,))
+        trade = c.fetchone()
+        if not trade:
+            return False, "Trade not found."
+        (id, username, symbol, trade_type, open_price, amount, leverage, ts, status, _, _, _) = trade
+        if status != 'open':
+            return False, "Trade already closed."
+
+        # Calculate P&L
+        if trade_type == 'buy':
+            pnl = (close_price - open_price) * amount * leverage
+        else:
+            pnl = (open_price - close_price) * amount * leverage
+
+        close_ts = datetime.now().isoformat()
+        c.execute("UPDATE trades SET status='closed', close_price=?, close_timestamp=?, pnl=? WHERE id=?",
+                  (close_price, close_ts, round(pnl, 4), trade_id))
+
+        # Update wallet balance with trade profit/loss
+        ref = f"TRD{trade_id}{close_ts}"
+        c.execute('''INSERT INTO wallet_transactions (username, type, amount, phone, provider, reference, status, timestamp)
+                     VALUES (?, 'trade', ?, 'system', 'Trading', ?, 'completed', ?)''',
+                  (username, round(pnl, 4), ref, close_ts))
+        conn.commit()
+        return True, f"Trade closed. P&L: ${pnl:.2f}"
+
+    @staticmethod
+    def get_trade_history(username, limit=30):
+        conn = get_db_connection()
+        df = pd.read_sql_query("SELECT * FROM trades WHERE username=? ORDER BY timestamp DESC LIMIT ?",
+                               conn, params=(username, limit))
+        return df
+
+# ------------------------------------------------------------------
 # JUP AI – TRADING NEWS AGENT
 # ------------------------------------------------------------------
 def jup_ai_tab():
@@ -635,11 +709,8 @@ def logout():
     st.rerun()
 
 # ------------------------------------------------------------------
-# SIDEBAR & MODE SELECTION
+# UI (CSS)
 # ------------------------------------------------------------------
-st.set_page_config(page_title="Arc OS", page_icon="🔄", layout="wide")
-
-# CSS
 st.markdown("""
 <style>
     .stApp { background: linear-gradient(135deg, #0a0a1a, #1a1a3a, #2a2a4a); color: #e0e0e0; }
@@ -654,7 +725,7 @@ st.markdown("""
     .logo-container { display: flex; justify-content: center; margin: 10px 0 20px 0; }
 </style>""", unsafe_allow_html=True)
 
-# Initialize data (same as before)
+# Initialize data
 if 'role' not in st.session_state:
     conn = get_db_connection()
     c = conn.cursor()
@@ -681,11 +752,13 @@ if 'crypto_daily_hist' not in st.session_state:
                     live_dict[cid] = row["Price (USD)"]
     st.session_state.crypto_daily_hist = CryptoForecast.generate_daily_history(90, live_dict)
 
-# Sidebar
+# ------------------------------------------------------------------
+# SIDEBAR
+# ------------------------------------------------------------------
 with st.sidebar:
     show_logo()
     st.write(f"👤 {st.session_state.username} ({st.session_state.role})")
-    mode_options = ["📊 Dashboard", "💱 Forex Pro", "🤖 Jup AI", "₿ Crypto Tracker", "💳 Mobile Wallet"]
+    mode_options = ["📊 Dashboard", "💱 Forex Pro", "🤖 Jup AI", "₿ Crypto Tracker", "📈 Trading", "💳 Mobile Wallet"]
     if 'mode' not in st.session_state:
         st.session_state.mode = mode_options[0]
     mode = st.radio("🧠 Engine", mode_options, index=mode_options.index(st.session_state.mode))
@@ -694,7 +767,6 @@ with st.sidebar:
     if mode == "💱 Forex Pro":
         st.checkbox("Real‑time forex", value=st.session_state.use_real_forex, key="use_real_forex")
 
-    # Settings (email update)
     with st.expander("⚙️ Account Settings"):
         new_email = st.text_input("New email", value="")
         if st.button("Update Email"):
@@ -704,7 +776,6 @@ with st.sidebar:
             else:
                 st.error("Please enter an email.")
 
-    # Admin user management
     if st.session_state.role == "admin":
         with st.expander("👥 User Management"):
             st.subheader("Add User")
@@ -742,15 +813,14 @@ with st.sidebar:
 
     if st.button("🚪 Logout"):
         logout()
-    st.caption("v10 · Jup AI Trading Agent")
+    st.caption("v11 · Trading & AI")
 
 # ------------------------------------------------------------------
-# DASHBOARD TAB
+# DASHBOARD
 # ------------------------------------------------------------------
 if mode == "📊 Dashboard":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.subheader("Dashboard Overview")
-    # Wallet balance
     balance = MobileWallet.get_balance(st.session_state.username)
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -766,14 +836,13 @@ if mode == "📊 Dashboard":
             st.metric("Top Crypto", best['Coin'], f"{best['24h Change %']}%")
     st.markdown("---")
     st.subheader("Market Snapshot")
-    # Small forex chart
     st.line_chart(forex_df.set_index("Time")[["EUR/USD", "GBP/USD"]])
     if crypto_df is not None:
         st.dataframe(crypto_df, hide_index=True, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
-# OTHER TABS (Forex, Jup AI, Crypto, Wallet)
+# FOREX PRO
 # ------------------------------------------------------------------
 elif mode == "💱 Forex Pro":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
@@ -805,6 +874,9 @@ elif mode == "💱 Forex Pro":
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
+# ------------------------------------------------------------------
+# CRYPTO TRACKER
+# ------------------------------------------------------------------
 elif mode == "₿ Crypto Tracker":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.subheader("₿ Live Crypto Prices")
@@ -830,11 +902,107 @@ elif mode == "₿ Crypto Tracker":
         st.line_chart(hist)
     st.markdown('</div>', unsafe_allow_html=True)
 
+# ------------------------------------------------------------------
+# JUP AI
+# ------------------------------------------------------------------
 elif mode == "🤖 Jup AI":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     jup_ai_tab()
     st.markdown('</div>', unsafe_allow_html=True)
 
+# ------------------------------------------------------------------
+# TRADING (NEW)
+# ------------------------------------------------------------------
+elif mode == "📈 Trading":
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    st.subheader("📈 Virtual Trading Terminal")
+    balance = MobileWallet.get_balance(st.session_state.username)
+    st.metric("Available Capital", f"${balance:,.2f}")
+
+    # Open new trade
+    with st.expander("➕ New Trade"):
+        market = st.selectbox("Market", ["Forex", "Crypto"])
+        if market == "Forex":
+            symbol = st.selectbox("Pair", ForexEngine.PAIRS)
+            # get latest price
+            latest_price = st.session_state.forex_data.iloc[-1][symbol]
+        else:
+            symbol = st.selectbox("Coin", CRYPTO_COINS, format_func=lambda x: CRYPTO_NAMES[x])
+            live = st.session_state.crypto_live_prices
+            if live is not None:
+                row = live[live['Coin']==CRYPTO_NAMES[symbol]]
+                latest_price = row.iloc[0]['Price (USD)'] if not row.empty else 0
+            else:
+                latest_price = 0
+        trade_type = st.selectbox("Direction", ["buy", "sell"])
+        amount = st.number_input("Amount (units)", min_value=0.01, value=1.0, step=0.1)
+        leverage = st.selectbox("Leverage", [1, 2, 5, 10], index=0)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Current Price", f"${latest_price:,.4f}" if latest_price else "N/A")
+        with col2:
+            total_value = amount * latest_price * leverage
+            st.metric("Total Exposure", f"${total_value:,.2f}")
+        if st.button("Execute Trade"):
+            if total_value > balance:
+                st.error("Insufficient balance (you need at least the exposure amount).")
+            else:
+                TradingModule.open_trade(st.session_state.username, symbol, trade_type, amount, latest_price, leverage)
+                st.success(f"{trade_type.upper()} order placed for {amount} {symbol}")
+                st.rerun()
+
+    # Open positions
+    st.subheader("📊 Open Positions")
+    positions = TradingModule.get_open_positions(st.session_state.username)
+    if not positions.empty:
+        for idx, pos in positions.iterrows():
+            with st.container():
+                cols = st.columns([2,1,1,1,1])
+                with cols[0]:
+                    st.write(f"**{pos['symbol']}** ({pos['trade_type']})")
+                with cols[1]:
+                    st.write(f"Open: {pos['open_price']}")
+                with cols[2]:
+                    st.write(f"Amount: {pos['amount']}")
+                with cols[3]:
+                    # get current price
+                    if pos['symbol'] in ForexEngine.PAIRS:
+                        current_price = st.session_state.forex_data.iloc[-1][pos['symbol']]
+                    else:
+                        live = st.session_state.crypto_live_prices
+                        if live is not None:
+                            row = live[live['Coin']==CRYPTO_NAMES.get(pos['symbol'], '')]
+                            current_price = row.iloc[0]['Price (USD)'] if not row.empty else pos['open_price']
+                        else:
+                            current_price = pos['open_price']
+                    # unrealized P&L
+                    if pos['trade_type'] == 'buy':
+                        upnl = (current_price - pos['open_price']) * pos['amount'] * pos['leverage']
+                    else:
+                        upnl = (pos['open_price'] - current_price) * pos['amount'] * pos['leverage']
+                    color = "green" if upnl >=0 else "red"
+                    st.markdown(f"Unreal. P&L: <span style='color:{color}'>${upnl:.2f}</span>", unsafe_allow_html=True)
+                with cols[4]:
+                    if st.button("Close", key=f"close_{pos['id']}"):
+                        result, msg = TradingModule.close_trade(pos['id'], current_price)
+                        if result:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
+                        st.rerun()
+    else:
+        st.info("No open positions.")
+
+    # Trade history
+    st.subheader("📜 Trade History")
+    history = TradingModule.get_trade_history(st.session_state.username)
+    if not history.empty:
+        st.dataframe(history[['symbol','trade_type','open_price','close_price','amount','leverage','pnl','status','timestamp']], use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ------------------------------------------------------------------
+# MOBILE WALLET
+# ------------------------------------------------------------------
 elif mode == "💳 Mobile Wallet":
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.subheader("💳 Mobile Wallet")
@@ -889,11 +1057,11 @@ elif mode == "💳 Mobile Wallet":
     st.subheader("Transaction History")
     txn_df = MobileWallet.get_transactions(st.session_state.username)
     if not txn_df.empty:
-        # Color status
+        # color status using 'map' instead of 'applymap'
         def color_status(val):
             color = 'green' if val == 'completed' else 'orange' if val == 'pending' else 'red'
             return f'color: {color}'
-        styled = txn_df.style.applymap(color_status, subset=['status'])
+        styled = txn_df.style.map(color_status, subset=['status'])
         st.dataframe(styled, use_container_width=True)
     else:
         st.info("No transactions yet.")
