@@ -28,6 +28,23 @@ except ImportError:
 # ------------------------------------------------------------------
 st.set_page_config(page_title="Trading App", page_icon="📈", layout="wide")
 
+# ------------------------------------------------------------------
+# VERCEL SPEED INSIGHTS
+# ------------------------------------------------------------------
+# Inject Vercel Speed Insights script for performance monitoring
+# This script is automatically served by Vercel after enabling Speed Insights
+# in the project dashboard at https://vercel.com/dashboard
+st.components.v1.html("""
+    <script>
+        (function() {
+            var script = document.createElement('script');
+            script.defer = true;
+            script.src = '/_vercel/speed-insights/script.js';
+            document.head.appendChild(script);
+        })();
+    </script>
+""", height=0)
+
 if AUTO_REFRESH:
     st_autorefresh(interval=30000, key="datarefresh")
 
