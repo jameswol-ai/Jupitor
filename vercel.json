@@ -1,0 +1,9 @@
+{
+  "redirects": [
+    {
+      "source": "/(.*)",
+      "destination": "https://jupitor.streamlit.app/$1",
+      "statusCode": 302
+    }
+  ]
+}
